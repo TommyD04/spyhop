@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "spyhop"
+version = "0.1.0"
+description = "Polymarket whale & insider tracker"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx",
+    "websockets",
+    "rich",
+]
+
+[project.scripts]
+spyhop = "spyhop.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/spyhop"]

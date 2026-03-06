@@ -1,0 +1,11 @@
+[ingestor]
+usd_threshold = 10_000          # Minimum trade size in USD to display
+ws_url = "wss://ws-live-data.polymarket.com"
+reconnect_delay_sec = 5         # Delay before WebSocket reconnect attempt
+
+[market_cache]
+gamma_url = "https://gamma-api.polymarket.com"
+ttl_minutes = 60                # Cache market metadata for 1 hour
+
+[display]
+max_rows = 50                   # Max trades shown in live table

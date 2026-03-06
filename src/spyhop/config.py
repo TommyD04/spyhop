@@ -1,0 +1,72 @@
+"""Config loader — TOML-based configuration with layered defaults."""
+
+from __future__ import annotations
+
+import sys
+import tomllib
+from pathlib import Path
+from typing import Any
+
+DEFAULTS: dict[str, Any] = {
+    "ingestor": {
+        "usd_threshold": 10_000,
+        "ws_url": "wss://ws-live-data.polymarket.com",
+        "reconnect_delay_sec": 5,
+    },
+    "market_cache": {
+        "gamma_url": "https://gamma-api.polymarket.com",
+        "ttl_minutes": 60,
+    },
+    "display": {
+        "max_rows": 50,
+    },
+}
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Merge override into base, recursing into nested dicts."""
+    merged = base.copy()
+    for key, val in override.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(val, dict):
+            merged[key] = _deep_merge(merged[key], val)
+        else:
+            merged[key] = val
+    return merged
+
+
+def _search_paths() -> list[Path]:
+    """Return config file search paths in priority order."""
+    paths = [Path("config.toml")]
+    if sys.platform == "win32":
+        appdata = Path.home() / "AppData" / "Roaming" / "spyhop"
+        paths.append(appdata / "config.toml")
+    else:
+        paths.append(Path.home() / ".config" / "spyhop" / "config.toml")
+    return paths
+
+
+def load_config(path: Path | None = None) -> dict[str, Any]:
+    """Load config from file, falling back to built-in defaults.
+
+    Search order: explicit path → ./config.toml → ~/.config/spyhop/config.toml → defaults only.
+    """
+    if path is not None:
+        with open(path, "rb") as f:
+            return _deep_merge(DEFAULTS, tomllib.load(f))
+
+    for candidate in _search_paths():
+        if candidate.exists():
+            with open(candidate, "rb") as f:
+                return _deep_merge(DEFAULTS, tomllib.load(f))
+
+    return DEFAULTS.copy()
+
+
+def db_path() -> Path:
+    """Return platform-appropriate database path, creating parent dirs."""
+    if sys.platform == "win32":
+        base = Path.home() / "AppData" / "Local" / "spyhop"
+    else:
+        base = Path.home() / ".local" / "share" / "spyhop"
+    base.mkdir(parents=True, exist_ok=True)
+    return base / "spyhop.db"

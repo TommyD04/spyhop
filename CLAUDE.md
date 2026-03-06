@@ -86,9 +86,16 @@ Avoid heavy deps (no PostgreSQL, Redis, Docker, web3 unless needed).
 
 **RTDS WebSocket** — Global trade firehose (PRIMARY for live detection)
 - URL: `wss://ws-live-data.polymarket.com`
-- Subscribe: `{"action": "subscribe", "subscriptions": [{"topic": "activity", "type": "trades", "filters": {}}]}`
-- Streams all trades across all markets in real time
-- No rate limit on connections
+- Subscribe: `{"action": "subscribe", "subscriptions": [{"topic": "activity", "type": "*"}]}`
+- **IMPORTANT**: `type: "trades"` receives NO data. Must use `"*"` wildcard. Actual messages arrive as `type: "orders_matched"`.
+- **IMPORTANT**: `filters` field must be omitted or empty string `""`. Empty object `{}` causes validation error.
+- Requires application-level `PING` text frame every 5s (not WebSocket-level ping). Responds with text `PONG`.
+- Known bug: data stream freezes after ~20 min. Implement 5-min silence timeout → reconnect.
+- Message envelope: `{"topic": "activity", "type": "orders_matched", "timestamp": <epoch_ms>, "payload": {...}, "connection_id": "..."}`
+- Payload fields: `asset`, `conditionId`, `eventSlug`, `slug`, `title`, `outcome`, `outcomeIndex`, `proxyWallet`, `pseudonym`, `name`, `side`, `size` (token qty, NOT USDC), `price`, `transactionHash`, `icon`, `bio`, `profileImage`
+- USDC value = `size * price` (size is outcome token quantity)
+- `title` field contains human-readable market question (no Gamma API needed for basic display)
+- Cloudflare-fronted; no special headers required
 - Official client: `@polymarket/real-time-data-client` (TypeScript; we implement our own in Python)
 
 **CLOB WebSocket** — Per-market price events
@@ -137,14 +144,16 @@ Alert threshold: score >= 7 out of 10.
 ## Phasing
 
 ### Phase 1 — MVP (current)
-- [ ] RTDS WebSocket connection + trade streaming
-- [ ] USD threshold filter (default $10K)
+- [x] RTDS WebSocket connection + trade streaming (V1 — complete)
+- [x] USD threshold filter, default $10K (V1 — complete)
+- [x] Market metadata cache via Gamma API (V1 — complete)
+- [x] Rich CLI: `spyhop watch` live table (V1 — complete)
+- [x] SQLite persistence: trades + markets (V1 — complete)
+- [x] TOML config file with layered defaults (V1 — complete)
 - [ ] Wallet profiling via Data API (trade count, history)
 - [ ] 3 detectors: fresh wallet, size anomaly, niche market
 - [ ] Composite scoring with configurable thresholds
 - [ ] Rich CLI output (ranked suspicious activity table)
-- [ ] SQLite persistence (wallets, trades, scores)
-- [ ] TOML config file for all thresholds
 
 ### Phase 2 — Enhanced Detection
 - [ ] DBSCAN temporal clustering (coordinated wallet timing)
