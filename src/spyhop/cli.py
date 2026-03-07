@@ -33,8 +33,8 @@ def _format_amount(usdc: float) -> str:
 
 
 def _format_price(price: float) -> str:
-    """Display as cents, e.g. 62¢."""
-    return f"{price * 100:.0f}¢" if price else "—"
+    """Display as cents, e.g. 62.5¢."""
+    return f"{price * 100:.1f}¢" if price else "—"
 
 
 def _build_table(trades: deque[dict[str, Any]], trade_count: int, connected: bool) -> Table:
@@ -47,7 +47,7 @@ def _build_table(trades: deque[dict[str, Any]], trade_count: int, connected: boo
     table.add_column("Wallet", width=13, no_wrap=True)
     table.add_column("Side", width=4, no_wrap=True)
     table.add_column("Amount", justify="right", width=10, no_wrap=True)
-    table.add_column("Price", justify="right", width=6, no_wrap=True)
+    table.add_column("Price", justify="right", width=7, no_wrap=True)
     table.add_column("Market", ratio=1)
 
     for trade in trades:
