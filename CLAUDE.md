@@ -10,21 +10,24 @@ Local-first Python CLI that monitors Polymarket for suspicious "whale" trading b
 ## Architecture
 
 ```
-CLI (Rich)  ←  ALERTER (ranked table)
-                  ↑
-              DETECTOR (composite scorer)
-                  ├─ FreshWalletDetector (< 5 prior trades)
-                  ├─ SizeAnomalyDetector (outsized vs liquidity)
-                  └─ NicheMarketDetector (low-volume market bets)
-                  ↑
-              PROFILER (wallet history + market metadata)
-                  ↑
-              INGESTOR (RTDS WebSocket + Data API fallback)
-                  ↑
-              STORAGE (SQLite)
+CLI (Rich live table + history view)
+    ↑
+DETECTOR (composite scorer)
+    ├─ FreshWalletDetector (< 5 prior trades)
+    ├─ SizeAnomalyDetector (outsized vs 24h volume)
+    └─ NicheMarketDetector (low-volume market bets)
+    ↑
+PROFILER (wallet + market + event metadata)
+    ├─ WalletCache  (Data API → trade count, freshness)
+    ├─ MarketCache  (Gamma API → volume, prices)
+    └─ EventCache   (Gamma API → category tags)
+    ↑
+INGESTOR (RTDS WebSocket)
+    ↑
+STORAGE (SQLite: trades, markets, wallets, events, signals)
 ```
 
-Pipeline: `ingestor → profiler → detector → alerter`
+Pipeline: `ingestor → profiler → detector → cli`
 
 Each stage has a single responsibility. Detectors are independent and pluggable.
 
@@ -143,26 +146,36 @@ Alert threshold: score >= 7 out of 10.
 
 ## Phasing
 
-### Phase 1 — MVP (current)
-- [x] RTDS WebSocket connection + trade streaming (V1 — complete)
-- [x] USD threshold filter, default $10K (V1 — complete)
-- [x] Market metadata cache via Gamma API (V1 — complete)
-- [x] Rich CLI: `spyhop watch` live table (V1 — complete)
-- [x] SQLite persistence: trades + markets (V1 — complete)
-- [x] TOML config file with layered defaults (V1 — complete)
-- [ ] Wallet profiling via Data API (trade count, history)
-- [ ] 3 detectors: fresh wallet, size anomaly, niche market
-- [ ] Composite scoring with configurable thresholds
-- [ ] Rich CLI output (ranked suspicious activity table)
+### Phase 1 — MVP (complete)
+- [x] V1: RTDS WebSocket connection + trade streaming
+- [x] V1: USD threshold filter, default $10K
+- [x] V1: Market metadata cache via Gamma API
+- [x] V1: Rich CLI `spyhop watch` live table
+- [x] V1: SQLite persistence (trades + markets)
+- [x] V1: TOML config file with layered defaults
+- [x] V2: Wallet profiling via Data API (trade count, history, freshness)
+- [x] V2: `spyhop wallet <addr>` deep lookup command
+- [x] V3: 3 detectors (fresh wallet, size anomaly, niche market)
+- [x] V3: Multiplicative composite scorer (0–10 scale)
+- [x] V3: Signals table + `spyhop history` command
+- [x] V3: F/S/N multiplier columns + Score column in watch table
+- [x] Event category tracking via Gamma `/events` API (EventCache)
+- [x] Cat column in dashboard (Politics, Sports, Crypto, Economy)
+- [x] Outcome display in market column (e.g. "O/U 6.5 → Under")
 
-### Phase 2 — Enhanced Detection
+### Phase 2 — Enhanced Detection (next)
+- [ ] V4: Paper trading (risk engine + PaperExecutor)
+- [ ] V5: P&L tracking (resolution poller)
 - [ ] DBSCAN temporal clustering (coordinated wallet timing)
 - [ ] Funding chain tracing (Polygon RPC: where did wallet funds come from?)
 - [ ] Historical win-rate analysis via Goldsky subgraphs
 - [ ] Wallet tagging / watchlist system
 - [ ] Reward farmer detection: tag matched buy-sell pairs (same wallet, same market, <N min apart) as `FARM` to filter noise from genuine directional trades. Observed pattern: rotating wallets doing single round-trips on high-reward near-certainty markets (e.g., Fed rate at 99.8¢), losing ~0.1¢/token to harvest `clobRewards` liquidity incentives.
+- [ ] Category-weighted scoring (Politics/Crypto insider risk > Sports)
+- [ ] Tag-based filtering (e.g., "only show Politics")
 
-### Phase 3 — TUI & Alerts
+### Phase 3 — TUI & Live Trading
+- [ ] V6: Live trading (CLOB Level 2)
 - [ ] Textual TUI with live updating tables
 - [ ] Discord / Telegram / Slack webhook alerts
 - [ ] Market-specific monitoring mode
@@ -178,25 +191,24 @@ spyhop/
 ├── src/
 │   └── spyhop/
 │       ├── __init__.py
-│       ├── __main__.py       # CLI entry point
+│       ├── __main__.py       # CLI entry (watch / wallet / history)
+│       ├── cli.py            # Rich live display + handle_trade loop
 │       ├── config.py         # TOML config loader
 │       ├── ingestor/
 │       │   ├── __init__.py
-│       │   ├── rtds.py       # RTDS WebSocket client
-│       │   └── polling.py    # Data API polling fallback
+│       │   └── rtds.py       # RTDS WebSocket client
 │       ├── profiler/
 │       │   ├── __init__.py
-│       │   ├── wallet.py     # Wallet history & profile lookup
-│       │   └── market.py     # Market metadata cache (Gamma API)
+│       │   ├── wallet.py     # Wallet history & profile (Data API)
+│       │   ├── market.py     # Market metadata cache (Gamma API)
+│       │   └── event.py      # Event category cache (Gamma API)
 │       ├── detector/
-│       │   ├── __init__.py
+│       │   ├── __init__.py   # build_scorer() factory
+│       │   ├── base.py       # Protocol, DetectionContext, ScoreResult
 │       │   ├── fresh_wallet.py
 │       │   ├── size_anomaly.py
 │       │   ├── niche_market.py
-│       │   └── scorer.py     # Composite scoring engine
-│       ├── alerter/
-│       │   ├── __init__.py
-│       │   └── cli.py        # Rich table output
+│       │   └── scorer.py     # Multiplicative composite scoring
 │       └── storage/
 │           ├── __init__.py
 │           └── db.py         # SQLite schema & queries
@@ -219,3 +231,16 @@ spyhop/
 - Config-driven thresholds (no magic numbers in detection logic)
 - SQLite via stdlib `sqlite3` (no ORM needed for MVP)
 - `rich` for all terminal output (tables, progress, logs)
+
+## Operational Notes
+
+### Use the spyhop CLI for data queries
+Before writing ad-hoc Python to query the SQLite database, check if an existing CLI command already does it:
+- `spyhop history --min-score 7` — show scored signals
+- `spyhop wallet <addr>` — deep wallet lookup
+- `spyhop watch` — live stream
+
+### Windows environment quirks
+- No `sqlite3` CLI available — use Python's `sqlite3` module or the spyhop CLI
+- When running inline Python via bash, use heredoc (`python3 << 'PYEOF'`) to avoid f-string/dict-key quoting conflicts
+- DB path: `C:/Users/thoma/AppData/Local/spyhop/spyhop.db`
