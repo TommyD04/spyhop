@@ -52,7 +52,7 @@ Stream whale trades in real time with a Rich live table:
 spyhop watch
 ```
 
-The table shows timestamp, wallet name/address, wallet trade count (Wlt column), side, USDC amount, price, and market question. Fresh wallets (5 or fewer prior trades) are highlighted in yellow/red.
+The table shows timestamp, wallet name/address, wallet trade count (Wlt column), suspicion score, side, USDC amount, price, and market question. Fresh wallets (5 or fewer prior trades) are highlighted in yellow/red. Scores >= 7 trigger alert highlighting; >= 9 are critical.
 
 ### Look up a wallet
 
@@ -69,6 +69,18 @@ spyhop wallet 0xd04d93BE590Ded67B99F053d4B6D29D3F8483312
 ```
 
 Displays a profile panel (trade count, unique markets, wallet age, freshness) and a table of the 20 most recent trades.
+
+### View detection signals
+
+Show past scored trades, sorted by suspicion score:
+
+```bash
+spyhop history
+spyhop history --min-score 5      # only medium+ signals
+spyhop history --limit 20         # last 20 signals
+```
+
+Columns: timestamp, wallet, composite score, F/S/N multipliers (Fresh/Size/Niche), USDC amount, market.
 
 ### Options
 
@@ -91,12 +103,14 @@ Spyhop stores data in a local SQLite database:
 - **Linux/macOS**: `~/.local/share/spyhop/spyhop.db`
 - **Windows**: `%LOCALAPPDATA%\spyhop\spyhop.db`
 
-Tables: `trades` (persisted whale trades), `markets` (Gamma API cache), `wallets` (Data API profile cache).
+Tables: `trades` (persisted whale trades), `markets` (Gamma API cache), `wallets` (Data API profile cache), `signals` (detection scores).
 
 ## Architecture
 
 ```
-CLI (Rich)  <--  watch / wallet commands
+CLI (Rich)  <--  watch / wallet / history commands
+                   |
+               DETECTOR (3 detectors + composite scorer)
                    |
                PROFILER (wallet history + market metadata)
                    |
@@ -105,7 +119,17 @@ CLI (Rich)  <--  watch / wallet commands
                STORAGE (SQLite)
 ```
 
-Pipeline: `ingestor -> profiler -> display`
+Pipeline: `ingestor -> profiler -> detector -> display`
+
+### Detection Model
+
+Three independent detectors produce multipliers (1.0 = no signal). The scorer multiplies them and maps via log10 to a 0-10 scale:
+
+- **FreshWallet**: flags wallets with 0-5 prior trades (up to 3.0x)
+- **SizeAnomaly**: flags trades that are large relative to market daily volume (up to 3.0x)
+- **NicheMarket**: flags trades on low-volume markets under $50K/day (up to 2.5x)
+
+Single signal scores ~2-4. Two signals score ~5-7. Three signals score 7-10. Alert threshold: 7. Critical threshold: 9.
 
 ## Dependencies
 

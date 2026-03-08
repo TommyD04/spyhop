@@ -1,4 +1,4 @@
-"""Rich live display for whale trade streaming."""
+"""Rich live display for whale trade streaming + detection scoring."""
 
 from __future__ import annotations
 
@@ -9,13 +9,14 @@ from collections import deque
 from typing import Any
 
 import httpx
+from rich.console import Console
 from rich.live import Live
+from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from rich.console import Console
-from rich.panel import Panel
-
+from spyhop.detector import build_scorer
+from spyhop.detector.base import DetectionContext
 from spyhop.ingestor.rtds import stream_trades
 from spyhop.profiler.market import MarketCache
 from spyhop.profiler.wallet import WalletCache
@@ -65,6 +66,21 @@ def _format_wlt(trade: dict[str, Any]) -> Text:
     return Text(label, style="dim")
 
 
+def _format_score(trade: dict[str, Any]) -> Text:
+    """Format composite suspicion score with alert highlighting."""
+    score = trade.get("score")
+    if score is None or score == 0:
+        return Text("-", style="dim")
+    label = f"{score:.1f}"
+    if score >= 9:
+        return Text(f"{label}!", style="bold red")
+    if score >= 7:
+        return Text(label, style="bold yellow")
+    if score >= 4:
+        return Text(label, style="yellow")
+    return Text(label, style="dim")
+
+
 def _build_table(trades: deque[dict[str, Any]], trade_count: int, connected: bool) -> Table:
     """Build the Rich table from current trade buffer."""
     status = "[green]● Connected[/]" if connected else "[red]● Disconnected[/]"
@@ -74,6 +90,7 @@ def _build_table(trades: deque[dict[str, Any]], trade_count: int, connected: boo
     table.add_column("Time", style="dim", width=8, no_wrap=True)
     table.add_column("Wallet", width=15, no_wrap=True)
     table.add_column("Wlt", justify="right", width=4, no_wrap=True)
+    table.add_column("Score", justify="right", width=5, no_wrap=True)
     table.add_column("Side", width=4, no_wrap=True)
     table.add_column("Amount", justify="right", width=10, no_wrap=True)
     table.add_column("Price", justify="right", width=7, no_wrap=True)
@@ -94,6 +111,7 @@ def _build_table(trades: deque[dict[str, Any]], trade_count: int, connected: boo
             time_display,
             _format_wallet_label(trade),
             _format_wlt(trade),
+            _format_score(trade),
             side_text,
             _format_amount(trade["usdc_size"]),
             _format_price(trade.get("price", 0)),
@@ -101,7 +119,7 @@ def _build_table(trades: deque[dict[str, Any]], trade_count: int, connected: boo
         )
 
     if not trades:
-        table.add_row("", "", "", "", "", "", "[dim]Waiting for whale trades...[/]")
+        table.add_row("", "", "", "", "", "", "", "[dim]Waiting for whale trades...[/]")
 
     return table
 
@@ -138,19 +156,24 @@ async def watch(config: dict[str, Any], conn: sqlite3.Connection) -> None:
         max_trades=prof_cfg["max_trades_to_fetch"],
     )
 
+    scorer = build_scorer(config)
+
     live = Live(_build_table(trade_buffer, trade_count, connected), refresh_per_second=4)
 
     async def handle_trade(trade: dict[str, Any]) -> None:
         nonlocal trade_count, connected
         connected = True
 
-        # Enrich with market metadata only if RTDS didn't include it
-        if not trade.get("market_question") and trade.get("condition_id"):
-            market = await market_cache.get_market(trade["condition_id"])
-            if market:
+        # Enrich with market metadata — always fetch for detector context
+        market = None
+        cid = trade.get("condition_id")
+        if cid:
+            market = await market_cache.get_market(cid)
+            if market and not trade.get("market_question"):
                 trade["market_question"] = market.question
 
         # Enrich with wallet profile (shallow — 1 HTTP call)
+        profile = None
         wallet_addr = trade.get("wallet")
         if wallet_addr:
             profile = await wallet_cache.get_profile(wallet_addr, depth="shallow")
@@ -158,8 +181,24 @@ async def watch(config: dict[str, Any], conn: sqlite3.Connection) -> None:
                 trade["wallet_trade_count"] = profile.trade_count
                 trade["wallet_is_fresh"] = profile.is_fresh
 
-        # Persist
-        db.insert_trade(conn, trade)
+        # Score (synchronous — no I/O, pure arithmetic)
+        context = DetectionContext(trade=trade, wallet_profile=profile, market=market)
+        score_result = scorer.score(context)
+        trade["score"] = score_result.composite
+
+        # Persist trade
+        trade_id = db.insert_trade(conn, trade)
+
+        # Persist signal if any detector fired
+        if score_result.composite > 0:
+            sig = {"trade_id": trade_id, "timestamp": trade["timestamp"],
+                   "composite_score": score_result.composite,
+                   "is_alert": int(score_result.alert),
+                   "is_critical": int(score_result.critical)}
+            for r in score_result.signals:
+                sig[f"{r.name}_mult"] = r.multiplier
+                sig[f"{r.name}_detail"] = r.detail
+            db.insert_signal(conn, sig)
 
         # Update display buffer
         trade_buffer.appendleft(trade)
@@ -264,3 +303,58 @@ async def wallet_lookup(config: dict[str, Any], conn: sqlite3.Connection, addres
 
     finally:
         await client.aclose()
+
+
+async def history_view(
+    config: dict[str, Any], conn: sqlite3.Connection,
+    limit: int = 50, min_score: float = 0.0,
+) -> None:
+    """Display past detection signals sorted by score."""
+    console = Console()
+
+    signals = db.get_recent_signals(conn, limit=limit, min_score=min_score)
+
+    if not signals:
+        console.print("[dim]No signals found.[/]")
+        return
+
+    table = Table(title=f"Detection Signals (min score {min_score})", expand=True)
+    table.add_column("Time", style="dim", width=19, no_wrap=True)
+    table.add_column("Wallet", width=13, no_wrap=True)
+    table.add_column("Score", justify="right", width=5, no_wrap=True)
+    table.add_column("F", justify="right", width=4, no_wrap=True)
+    table.add_column("S", justify="right", width=4, no_wrap=True)
+    table.add_column("N", justify="right", width=4, no_wrap=True)
+    table.add_column("Amount", justify="right", width=10, no_wrap=True)
+    table.add_column("Market", ratio=1)
+
+    for s in signals:
+        score = s["composite_score"]
+        score_text = Text(f"{score:.1f}")
+        if score >= 9:
+            score_text.stylize("bold red")
+        elif score >= 7:
+            score_text.stylize("bold yellow")
+        elif score >= 4:
+            score_text.stylize("yellow")
+        else:
+            score_text.stylize("dim")
+
+        def _mult_text(val: float) -> Text:
+            if val > 1.0:
+                return Text(f"{val:.1f}", style="yellow")
+            return Text("-", style="dim")
+
+        ts = s.get("timestamp", "")
+        table.add_row(
+            ts[:19],
+            _truncate_wallet(s.get("wallet", "")),
+            score_text,
+            _mult_text(s.get("fresh_mult", 1.0)),
+            _mult_text(s.get("size_mult", 1.0)),
+            _mult_text(s.get("niche_mult", 1.0)),
+            _format_amount(s.get("usdc_size", 0)),
+            s.get("market_question", "") or s.get("condition_id", "")[:12],
+        )
+
+    console.print(table)

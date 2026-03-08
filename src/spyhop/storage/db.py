@@ -17,7 +17,9 @@ CREATE TABLE IF NOT EXISTS trades (
     condition_id    TEXT,
     asset_id        TEXT,
     market_question TEXT,
-    tx_hash         TEXT
+    tx_hash         TEXT,
+    outcome         TEXT,
+    outcome_index   INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS markets (
@@ -41,10 +43,36 @@ CREATE TABLE IF NOT EXISTS wallets (
     profile_depth   TEXT NOT NULL DEFAULT 'shallow'
 );
 
+CREATE TABLE IF NOT EXISTS signals (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_id        INTEGER NOT NULL REFERENCES trades(id),
+    timestamp       TEXT    NOT NULL,
+    composite_score REAL    NOT NULL,
+    fresh_mult      REAL    NOT NULL DEFAULT 1.0,
+    fresh_detail    TEXT,
+    size_mult       REAL    NOT NULL DEFAULT 1.0,
+    size_detail     TEXT,
+    niche_mult      REAL    NOT NULL DEFAULT 1.0,
+    niche_detail    TEXT,
+    is_alert        INTEGER NOT NULL DEFAULT 0,
+    is_critical     INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_trades_condition ON trades(condition_id);
 CREATE INDEX IF NOT EXISTS idx_wallets_trade_count ON wallets(trade_count);
+CREATE INDEX IF NOT EXISTS idx_signals_score ON signals(composite_score DESC);
+CREATE INDEX IF NOT EXISTS idx_signals_trade ON signals(trade_id);
 """
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns to existing tables that predate V3."""
+    for col, typ in [("outcome", "TEXT"), ("outcome_index", "INTEGER")]:
+        try:
+            conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {typ}")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
 
 
 def init_db(path: Path) -> sqlite3.Connection:
@@ -52,18 +80,22 @@ def init_db(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
+    _migrate(conn)
     return conn
 
 
-def insert_trade(conn: sqlite3.Connection, trade: dict[str, Any]) -> None:
-    """Insert a single trade record."""
-    conn.execute(
+def insert_trade(conn: sqlite3.Connection, trade: dict[str, Any]) -> int:
+    """Insert a single trade record. Returns the row ID."""
+    cur = conn.execute(
         """INSERT INTO trades
-           (timestamp, wallet, side, usdc_size, price, condition_id, asset_id, market_question, tx_hash)
-           VALUES (:timestamp, :wallet, :side, :usdc_size, :price, :condition_id, :asset_id, :market_question, :tx_hash)""",
+           (timestamp, wallet, side, usdc_size, price, condition_id, asset_id,
+            market_question, tx_hash, outcome, outcome_index)
+           VALUES (:timestamp, :wallet, :side, :usdc_size, :price, :condition_id,
+                   :asset_id, :market_question, :tx_hash, :outcome, :outcome_index)""",
         trade,
     )
     conn.commit()
+    return cur.lastrowid
 
 
 def get_recent_trades(conn: sqlite3.Connection, limit: int = 50) -> list[dict[str, Any]]:
@@ -112,3 +144,36 @@ def upsert_market(conn: sqlite3.Connection, market: dict[str, Any]) -> None:
         market,
     )
     conn.commit()
+
+
+def insert_signal(conn: sqlite3.Connection, signal: dict[str, Any]) -> int:
+    """Insert a detection signal. Returns the row ID."""
+    cur = conn.execute(
+        """INSERT INTO signals
+           (trade_id, timestamp, composite_score,
+            fresh_mult, fresh_detail, size_mult, size_detail,
+            niche_mult, niche_detail, is_alert, is_critical)
+           VALUES (:trade_id, :timestamp, :composite_score,
+                   :fresh_mult, :fresh_detail, :size_mult, :size_detail,
+                   :niche_mult, :niche_detail, :is_alert, :is_critical)""",
+        signal,
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def get_recent_signals(
+    conn: sqlite3.Connection, limit: int = 50, min_score: float = 0.0
+) -> list[dict[str, Any]]:
+    """Return recent signals joined with trade data, sorted by score descending."""
+    rows = conn.execute(
+        """SELECT s.*, t.wallet, t.side, t.usdc_size, t.price,
+                  t.market_question, t.condition_id
+           FROM signals s
+           JOIN trades t ON s.trade_id = t.id
+           WHERE s.composite_score >= ?
+           ORDER BY s.composite_score DESC
+           LIMIT ?""",
+        (min_score, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]

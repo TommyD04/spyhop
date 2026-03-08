@@ -12,5 +12,29 @@ data_api_url = "https://data-api.polymarket.com"
 max_trades_to_fetch = 200       # Max trades to paginate for deep profile
 wallet_cache_ttl_minutes = 30   # Cache wallet profiles for 30 min
 
+[detector.fresh_wallet]
+max_prior_trades = 5            # Wallets with <= this many trades are "fresh"
+multiplier_zero = 3.0           # 0 prior trades
+multiplier_low = 2.5            # 1-2 prior trades
+multiplier_mid = 2.0            # 3-5 prior trades
+
+[detector.size_anomaly]
+min_trade_usd = 10_000          # Noise floor
+orderbook_impact_pct = 0.02     # Reserved for CLOB integration
+volume_spike_multiplier = 5.0   # Reserved
+multiplier_low = 1.5            # 2-5% of 24h volume
+multiplier_mid = 2.0            # 5-10% of 24h volume
+multiplier_high = 3.0           # 10%+ of 24h volume
+
+[detector.niche_market]
+max_daily_volume_usd = 50_000   # Markets below this are "niche"
+multiplier_low = 1.5            # $25K-$50K daily
+multiplier_mid = 2.0            # $10K-$25K daily
+multiplier_high = 2.5           # <$10K daily
+
+[scorer]
+alert_threshold = 7             # Score >= 7 triggers alert
+critical_threshold = 9          # Score >= 9 triggers critical
+
 [display]
 max_rows = 50                   # Max trades shown in live table

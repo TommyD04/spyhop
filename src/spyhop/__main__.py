@@ -1,4 +1,4 @@
-"""CLI entry point — spyhop watch."""
+"""CLI entry point — spyhop watch / wallet / history."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import sys
 
 from spyhop.config import load_config, db_path
 from spyhop.storage.db import init_db
-from spyhop.cli import watch, wallet_lookup
+from spyhop.cli import watch, wallet_lookup, history_view
 
 
 def main() -> None:
@@ -28,6 +28,13 @@ def main() -> None:
     sub.add_parser("watch", help="Stream whale trades in real time")
     wallet_parser = sub.add_parser("wallet", help="Look up a wallet profile")
     wallet_parser.add_argument("address", help="Proxy wallet address to look up")
+    history_parser = sub.add_parser("history", help="Show past detection signals")
+    history_parser.add_argument(
+        "--min-score", type=float, default=0.0, help="Minimum score to show (default: 0)"
+    )
+    history_parser.add_argument(
+        "--limit", type=int, default=50, help="Max signals to show (default: 50)"
+    )
 
     args = parser.parse_args()
 
@@ -60,6 +67,14 @@ def main() -> None:
     elif args.command == "wallet":
         try:
             asyncio.run(wallet_lookup(config, conn, args.address))
+        except KeyboardInterrupt:
+            pass
+        finally:
+            conn.close()
+
+    elif args.command == "history":
+        try:
+            asyncio.run(history_view(config, conn, limit=args.limit, min_score=args.min_score))
         except KeyboardInterrupt:
             pass
         finally:

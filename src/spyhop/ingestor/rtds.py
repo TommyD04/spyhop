@@ -62,6 +62,8 @@ def _parse_trade(raw: dict[str, Any]) -> dict[str, Any] | None:
             "market_question": raw.get("title", ""),  # RTDS includes market title
             "name": raw.get("name", "") or "",
             "pseudonym": raw.get("pseudonym", "") or "",
+            "outcome": raw.get("outcome", ""),
+            "outcome_index": raw.get("outcomeIndex"),
         }
     except (ValueError, TypeError):
         return None

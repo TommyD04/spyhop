@@ -22,6 +22,32 @@ DEFAULTS: dict[str, Any] = {
         "max_trades_to_fetch": 200,
         "wallet_cache_ttl_minutes": 30,
     },
+    "detector": {
+        "fresh_wallet": {
+            "max_prior_trades": 5,
+            "multiplier_zero": 3.0,
+            "multiplier_low": 2.5,
+            "multiplier_mid": 2.0,
+        },
+        "size_anomaly": {
+            "min_trade_usd": 10_000,
+            "orderbook_impact_pct": 0.02,
+            "volume_spike_multiplier": 5.0,
+            "multiplier_low": 1.5,
+            "multiplier_mid": 2.0,
+            "multiplier_high": 3.0,
+        },
+        "niche_market": {
+            "max_daily_volume_usd": 50_000,
+            "multiplier_low": 1.5,
+            "multiplier_mid": 2.0,
+            "multiplier_high": 2.5,
+        },
+    },
+    "scorer": {
+        "alert_threshold": 7,
+        "critical_threshold": 9,
+    },
     "display": {
         "max_rows": 50,
     },
