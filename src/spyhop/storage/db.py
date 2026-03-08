@@ -58,6 +58,14 @@ CREATE TABLE IF NOT EXISTS signals (
     is_critical     INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS events (
+    event_slug      TEXT PRIMARY KEY,
+    title           TEXT,
+    tags            TEXT,
+    primary_tag     TEXT,
+    last_fetched    TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_trades_condition ON trades(condition_id);
 CREATE INDEX IF NOT EXISTS idx_wallets_trade_count ON wallets(trade_count);
@@ -160,6 +168,25 @@ def insert_signal(conn: sqlite3.Connection, signal: dict[str, Any]) -> int:
     )
     conn.commit()
     return cur.lastrowid
+
+
+def get_event(conn: sqlite3.Connection, event_slug: str) -> dict[str, Any] | None:
+    """Fetch a cached event by slug, or None if not found."""
+    row = conn.execute(
+        "SELECT * FROM events WHERE event_slug = ?", (event_slug,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_event(conn: sqlite3.Connection, event: dict[str, Any]) -> None:
+    """Insert or replace an event cache entry."""
+    conn.execute(
+        """INSERT OR REPLACE INTO events
+           (event_slug, title, tags, primary_tag, last_fetched)
+           VALUES (:event_slug, :title, :tags, :primary_tag, :last_fetched)""",
+        event,
+    )
+    conn.commit()
 
 
 def get_recent_signals(

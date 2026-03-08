@@ -12,6 +12,10 @@ data_api_url = "https://data-api.polymarket.com"
 max_trades_to_fetch = 200       # Max trades to paginate for deep profile
 wallet_cache_ttl_minutes = 30   # Cache wallet profiles for 30 min
 
+[event_cache]
+gamma_url = "https://gamma-api.polymarket.com"
+ttl_minutes = 120               # Events change less often than markets
+
 [detector.fresh_wallet]
 max_prior_trades = 5            # Wallets with <= this many trades are "fresh"
 multiplier_zero = 3.0           # 0 prior trades

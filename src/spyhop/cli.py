@@ -18,6 +18,7 @@ from rich.text import Text
 from spyhop.detector import build_scorer
 from spyhop.detector.base import DetectionContext
 from spyhop.ingestor.rtds import stream_trades
+from spyhop.profiler.event import EventCache
 from spyhop.profiler.market import MarketCache
 from spyhop.profiler.wallet import WalletCache
 from spyhop.storage import db
@@ -88,6 +89,23 @@ def _format_score(trade: dict[str, Any]) -> Text:
     return Text(label, style="dim")
 
 
+_TAG_STYLES = {
+    "Politics": "bright_cyan",
+    "Sports": "bright_green",
+    "Crypto": "bright_yellow",
+    "Economy": "bright_blue",
+}
+
+
+def _format_tag(trade: dict[str, Any]) -> Text:
+    """Format primary event category tag with color coding."""
+    tag = trade.get("primary_tag", "")
+    if not tag:
+        return Text("-", style="dim")
+    style = _TAG_STYLES.get(tag, "dim")
+    return Text(tag[:8], style=style)
+
+
 def _format_market(trade: dict[str, Any]) -> str:
     """Market question with outcome appended, e.g. 'O/U 6.5 → Under'."""
     question = trade.get("market_question", "") or trade.get("condition_id", "")[:12]
@@ -106,6 +124,7 @@ def _build_table(trades: deque[dict[str, Any]], trade_count: int, connected: boo
     table.add_column("Time", style="dim", width=8, no_wrap=True)
     table.add_column("Wallet", width=15, no_wrap=True)
     table.add_column("Wlt", justify="right", width=4, no_wrap=True)
+    table.add_column("Cat", width=8, no_wrap=True)
     table.add_column("F", justify="right", width=4, no_wrap=True)
     table.add_column("S", justify="right", width=4, no_wrap=True)
     table.add_column("N", justify="right", width=4, no_wrap=True)
@@ -130,6 +149,7 @@ def _build_table(trades: deque[dict[str, Any]], trade_count: int, connected: boo
             time_display,
             _format_wallet_label(trade),
             _format_wlt(trade),
+            _format_tag(trade),
             _format_mult(trade.get("fresh_wallet_mult")),
             _format_mult(trade.get("size_anomaly_mult")),
             _format_mult(trade.get("niche_market_mult")),
@@ -141,7 +161,7 @@ def _build_table(trades: deque[dict[str, Any]], trade_count: int, connected: boo
         )
 
     if not trades:
-        table.add_row("", "", "", "", "", "", "", "", "", "", "[dim]Waiting for whale trades...[/]")
+        table.add_row("", "", "", "", "", "", "", "", "", "", "", "[dim]Waiting for whale trades...[/]")
 
     return table
 
@@ -169,6 +189,13 @@ async def watch(config: dict[str, Any], conn: sqlite3.Connection) -> None:
         ttl_minutes=config["market_cache"]["ttl_minutes"],
     )
 
+    event_cache = EventCache(
+        conn=conn,
+        client=client,
+        gamma_url=config["event_cache"]["gamma_url"],
+        ttl_minutes=config["event_cache"]["ttl_minutes"],
+    )
+
     prof_cfg = config["profiler"]
     wallet_cache = WalletCache(
         conn=conn,
@@ -193,6 +220,13 @@ async def watch(config: dict[str, Any], conn: sqlite3.Connection) -> None:
             market = await market_cache.get_market(cid, slug=trade.get("market_slug", ""))
             if market and not trade.get("market_question"):
                 trade["market_question"] = market.question
+
+        # Enrich with event category tag
+        event_slug = trade.get("event_slug")
+        if event_slug:
+            event = await event_cache.get_event(event_slug)
+            if event:
+                trade["primary_tag"] = event.primary_tag
 
         # Enrich with wallet profile (shallow — 1 HTTP call)
         profile = None

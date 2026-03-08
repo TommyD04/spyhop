@@ -65,6 +65,7 @@ def _parse_trade(raw: dict[str, Any]) -> dict[str, Any] | None:
             "pseudonym": raw.get("pseudonym", "") or "",
             "outcome": raw.get("outcome", ""),
             "outcome_index": raw.get("outcomeIndex"),
+            "event_slug": raw.get("eventSlug", ""),
         }
     except (ValueError, TypeError):
         return None
