@@ -144,6 +144,65 @@ Each detector returns a 0-N sub-score. Combined into a 0-10 composite. Signals s
 
 Alert threshold: score >= 7 out of 10.
 
+## Strategy Detection (Future Workstream)
+
+Beyond raw suspicion scoring, Spyhop needs to **classify** detected trades into strategy types. Each type implies a different investment response.
+
+### Strategy Types
+
+| Label | What It Is | Spyhop Action | Investment Response |
+|-------|-----------|---------------|---------------------|
+| `FARM` | Reward/airdrop farming | Filter out (noise) | Ignore — no directional signal |
+| `INSIDER` | True insider information | High-confidence alert | Aggressive counter-trade: follow the position, size up, tight timeframe |
+| `INFORMED` | Edge from public info analysis | Moderate-confidence alert | Moderate counter-trade: follow direction, smaller size, wider timeframe |
+
+### FARM Detection
+
+Scripted buy-sell round-trips to inflate volume for $POLY airdrop qualification.
+
+**Heuristic**: Tag as `FARM` when ALL of:
+- Same wallet (proxy address)
+- Same market (condition_id)
+- Opposite side (BUY ↔ SELL)
+- Time delta ≤ 120 seconds
+
+**Extended signals**:
+- Wallet cluster detection (multiple wallets with identical trading cadence, e.g. 61s intervals)
+- Round-trip P&L ≈ 0 or slightly negative (spread loss only)
+- Concentration on sports markets (45% of sports volume is wash trading per Columbia study)
+- Near-certainty markets (price > 95¢) with no directional conviction
+
+**See**: `research/REWARD_FARMING.md` for full analysis.
+
+### INSIDER Detection
+
+True non-public information — someone knows the outcome before the market does.
+
+**Distinguishing signals**:
+- Fresh wallet + large position + niche market (the current composite scorer)
+- **One-directional**: no hedging, no round-trip — conviction trade
+- **Timing**: position taken shortly before resolution or major news
+- **Market category**: Politics and Crypto carry higher insider risk than Sports (Sports outcomes are harder to know in advance outside match-fixing)
+- **Win rate anomaly**: statistically improbable accuracy across resolved markets (Phase 2, requires Goldsky backfill)
+- **Funding chain**: wallet funded shortly before trade, from a mixer or fresh source (Phase 2)
+
+### INFORMED Detection
+
+Edge derived from superior analysis of public information — not illegal, but still profitable to follow.
+
+**Distinguishing signals**:
+- **Established wallet** with moderate trade history (NOT fresh — they have a track record)
+- **Concentrated position**: large size on a specific outcome, but from a wallet with proven accuracy
+- **Category expertise**: wallet history shows specialization (e.g., only trades Crypto markets, or only French politics)
+- **Pre-event timing**: position taken hours/days before resolution, not minutes (insiders trade late; informed traders trade early when odds are mispriced)
+- **Historical P&L**: positive returns across resolved markets, but not impossibly so (60-70% accuracy vs insider's 90%+)
+
+### Classification Priority
+
+1. **FARM filter first** — suppress the noise (highest volume of false positives today)
+2. **INSIDER vs INFORMED separation second** — requires wallet history depth (Goldsky backfill) and win-rate tracking (resolution poller)
+3. **Category weighting third** — Politics/Crypto insider risk > Sports; adjust score multipliers by event category
+
 ## Phasing
 
 ### Phase 1 — MVP (complete)
