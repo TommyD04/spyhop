@@ -66,6 +66,13 @@ def _format_wlt(trade: dict[str, Any]) -> Text:
     return Text(label, style="dim")
 
 
+def _format_mult(val: float | None) -> Text:
+    """Format a detector multiplier: 2.5x in yellow, or dim dash if 1.0."""
+    if val is None or val <= 1.0:
+        return Text("-", style="dim")
+    return Text(f"{val:.1f}x", style="yellow")
+
+
 def _format_score(trade: dict[str, Any]) -> Text:
     """Format composite suspicion score with alert highlighting."""
     score = trade.get("score")
@@ -90,6 +97,9 @@ def _build_table(trades: deque[dict[str, Any]], trade_count: int, connected: boo
     table.add_column("Time", style="dim", width=8, no_wrap=True)
     table.add_column("Wallet", width=15, no_wrap=True)
     table.add_column("Wlt", justify="right", width=4, no_wrap=True)
+    table.add_column("F", justify="right", width=4, no_wrap=True)
+    table.add_column("S", justify="right", width=4, no_wrap=True)
+    table.add_column("N", justify="right", width=4, no_wrap=True)
     table.add_column("Score", justify="right", width=5, no_wrap=True)
     table.add_column("Side", width=4, no_wrap=True)
     table.add_column("Amount", justify="right", width=10, no_wrap=True)
@@ -111,6 +121,9 @@ def _build_table(trades: deque[dict[str, Any]], trade_count: int, connected: boo
             time_display,
             _format_wallet_label(trade),
             _format_wlt(trade),
+            _format_mult(trade.get("fresh_wallet_mult")),
+            _format_mult(trade.get("size_anomaly_mult")),
+            _format_mult(trade.get("niche_market_mult")),
             _format_score(trade),
             side_text,
             _format_amount(trade["usdc_size"]),
@@ -119,7 +132,7 @@ def _build_table(trades: deque[dict[str, Any]], trade_count: int, connected: boo
         )
 
     if not trades:
-        table.add_row("", "", "", "", "", "", "", "[dim]Waiting for whale trades...[/]")
+        table.add_row("", "", "", "", "", "", "", "", "", "", "[dim]Waiting for whale trades...[/]")
 
     return table
 
@@ -168,7 +181,7 @@ async def watch(config: dict[str, Any], conn: sqlite3.Connection) -> None:
         market = None
         cid = trade.get("condition_id")
         if cid:
-            market = await market_cache.get_market(cid)
+            market = await market_cache.get_market(cid, slug=trade.get("market_slug", ""))
             if market and not trade.get("market_question"):
                 trade["market_question"] = market.question
 
@@ -185,19 +198,28 @@ async def watch(config: dict[str, Any], conn: sqlite3.Connection) -> None:
         context = DetectionContext(trade=trade, wallet_profile=profile, market=market)
         score_result = scorer.score(context)
         trade["score"] = score_result.composite
+        for sig in score_result.signals:
+            trade[f"{sig.name}_mult"] = sig.multiplier
 
         # Persist trade
         trade_id = db.insert_trade(conn, trade)
 
         # Persist signal if any detector fired
         if score_result.composite > 0:
+            # Map detector names to DB column prefixes
+            _col_map = {"fresh_wallet": "fresh", "size_anomaly": "size",
+                        "niche_market": "niche"}
             sig = {"trade_id": trade_id, "timestamp": trade["timestamp"],
                    "composite_score": score_result.composite,
+                   "fresh_mult": 1.0, "fresh_detail": "",
+                   "size_mult": 1.0, "size_detail": "",
+                   "niche_mult": 1.0, "niche_detail": "",
                    "is_alert": int(score_result.alert),
                    "is_critical": int(score_result.critical)}
             for r in score_result.signals:
-                sig[f"{r.name}_mult"] = r.multiplier
-                sig[f"{r.name}_detail"] = r.detail
+                col = _col_map.get(r.name, r.name)
+                sig[f"{col}_mult"] = r.multiplier
+                sig[f"{col}_detail"] = r.detail
             db.insert_signal(conn, sig)
 
         # Update display buffer

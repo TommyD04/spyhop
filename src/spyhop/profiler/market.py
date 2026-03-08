@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -11,6 +12,8 @@ from typing import Any
 import httpx
 
 from spyhop.storage import db
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -43,15 +46,19 @@ class MarketCache:
         fetched = datetime.fromisoformat(market_row["last_fetched"])
         return datetime.now(timezone.utc) - fetched < self._ttl
 
-    async def get_market(self, condition_id: str) -> Market | None:
-        """Look up market metadata, hitting Gamma API on cache miss/expiry."""
+    async def get_market(self, condition_id: str, slug: str = "") -> Market | None:
+        """Look up market metadata, hitting Gamma API on cache miss/expiry.
+
+        The Gamma API does NOT support filtering by conditionId. We use
+        the slug (provided by RTDS) to query ?slug=<slug> instead.
+        """
         # Check cache
         cached = db.get_market(self._conn, condition_id)
         if cached and self._is_fresh(cached):
             return self._row_to_market(cached)
 
-        # Fetch from Gamma API
-        market = await self._fetch_from_gamma(condition_id)
+        # Fetch from Gamma API using slug
+        market = await self._fetch_from_gamma(condition_id, slug)
         if market:
             db.upsert_market(self._conn, {
                 "condition_id": market.condition_id,
@@ -64,25 +71,51 @@ class MarketCache:
             })
         return market
 
-    async def _fetch_from_gamma(self, condition_id: str) -> Market | None:
-        """Fetch a single market from the Gamma API."""
-        try:
-            resp = await self._client.get(
-                f"{self._gamma_url}/markets",
-                params={"condition_id": condition_id},
-            )
-            resp.raise_for_status()
-            data = resp.json()
+    async def _fetch_from_gamma(self, condition_id: str, slug: str = "") -> Market | None:
+        """Fetch a single market from the Gamma API.
 
-            # Gamma returns a list; take the first match
-            if isinstance(data, list) and data:
-                return self._parse_market(data[0])
-            if isinstance(data, dict) and data.get("condition_id"):
-                return self._parse_market(data)
+        Primary strategy: query by slug (reliable, returns exact match).
+        Fallback: query by conditionId via CLOB API (no volume data).
+        """
+        # Strategy 1: Gamma ?slug=<slug> (returns full metadata including volume_24hr)
+        if slug:
+            try:
+                resp = await self._client.get(
+                    f"{self._gamma_url}/markets",
+                    params={"slug": slug},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                if isinstance(data, list) and data:
+                    market = self._parse_market(data[0])
+                    # Verify the conditionId matches to avoid slug collisions
+                    if market.condition_id == condition_id:
+                        return market
+                    log.warning("Slug %s returned wrong conditionId", slug)
+            except httpx.HTTPError:
+                pass
 
-            return None
-        except (httpx.HTTPError, KeyError, IndexError):
-            return None
+        # Strategy 2: CLOB /markets/{conditionId} (direct lookup, but no volume)
+        if condition_id:
+            try:
+                resp = await self._client.get(
+                    f"https://clob.polymarket.com/markets/{condition_id}",
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                if isinstance(data, dict) and data.get("condition_id"):
+                    return Market(
+                        condition_id=data["condition_id"],
+                        question=data.get("question", "Unknown market"),
+                        slug=data.get("market_slug", ""),
+                        volume=0.0,
+                        volume_24hr=0.0,  # CLOB doesn't provide volume
+                        outcome_prices="[]",
+                    )
+            except httpx.HTTPError:
+                pass
+
+        return None
 
     @staticmethod
     def _parse_market(raw: dict[str, Any]) -> Market:
