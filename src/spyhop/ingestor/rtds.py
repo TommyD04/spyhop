@@ -60,6 +60,8 @@ def _parse_trade(raw: dict[str, Any]) -> dict[str, Any] | None:
             "asset_id": raw.get("asset", ""),
             "tx_hash": raw.get("transactionHash", ""),
             "market_question": raw.get("title", ""),  # RTDS includes market title
+            "name": raw.get("name", "") or "",
+            "pseudonym": raw.get("pseudonym", "") or "",
         }
     except (ValueError, TypeError):
         return None

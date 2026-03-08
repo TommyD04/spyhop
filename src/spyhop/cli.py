@@ -13,8 +13,12 @@ from rich.live import Live
 from rich.table import Table
 from rich.text import Text
 
+from rich.console import Console
+from rich.panel import Panel
+
 from spyhop.ingestor.rtds import stream_trades
 from spyhop.profiler.market import MarketCache
+from spyhop.profiler.wallet import WalletCache
 from spyhop.storage import db
 
 log = logging.getLogger(__name__)
@@ -37,6 +41,30 @@ def _format_price(price: float) -> str:
     return f"{price * 100:.1f}¢" if price else "—"
 
 
+def _format_wallet_label(trade: dict[str, Any]) -> Text:
+    """Show display name or pseudonym if available, otherwise truncated address."""
+    name = trade.get("name") or trade.get("pseudonym") or ""
+    addr = trade.get("wallet", "")
+    if name:
+        label = name[:14]
+    else:
+        label = _truncate_wallet(addr)
+    return Text(label)
+
+
+def _format_wlt(trade: dict[str, Any]) -> Text:
+    """Format wallet trade count column with freshness highlighting."""
+    count = trade.get("wallet_trade_count")
+    if count is None:
+        return Text("-", style="dim")
+    if count <= 2:
+        return Text(str(count), style="bold red")
+    if count <= 5:
+        return Text(str(count), style="yellow")
+    label = "6+" if count == 6 else str(count)
+    return Text(label, style="dim")
+
+
 def _build_table(trades: deque[dict[str, Any]], trade_count: int, connected: bool) -> Table:
     """Build the Rich table from current trade buffer."""
     status = "[green]● Connected[/]" if connected else "[red]● Disconnected[/]"
@@ -44,7 +72,8 @@ def _build_table(trades: deque[dict[str, Any]], trade_count: int, connected: boo
 
     table = Table(title=title, expand=True, show_lines=False)
     table.add_column("Time", style="dim", width=8, no_wrap=True)
-    table.add_column("Wallet", width=13, no_wrap=True)
+    table.add_column("Wallet", width=15, no_wrap=True)
+    table.add_column("Wlt", justify="right", width=4, no_wrap=True)
     table.add_column("Side", width=4, no_wrap=True)
     table.add_column("Amount", justify="right", width=10, no_wrap=True)
     table.add_column("Price", justify="right", width=7, no_wrap=True)
@@ -63,7 +92,8 @@ def _build_table(trades: deque[dict[str, Any]], trade_count: int, connected: boo
 
         table.add_row(
             time_display,
-            _truncate_wallet(trade.get("wallet", "")),
+            _format_wallet_label(trade),
+            _format_wlt(trade),
             side_text,
             _format_amount(trade["usdc_size"]),
             _format_price(trade.get("price", 0)),
@@ -71,7 +101,7 @@ def _build_table(trades: deque[dict[str, Any]], trade_count: int, connected: boo
         )
 
     if not trades:
-        table.add_row("", "", "", "", "", "[dim]Waiting for whale trades...[/]")
+        table.add_row("", "", "", "", "", "", "[dim]Waiting for whale trades...[/]")
 
     return table
 
@@ -89,11 +119,23 @@ async def watch(config: dict[str, Any], conn: sqlite3.Connection) -> None:
         trade_buffer.appendleft(t)
     trade_count = len(recent)
 
+    # Shared httpx client for both caches (connection pooling)
+    client = httpx.AsyncClient(timeout=10.0)
+
     market_cache = MarketCache(
         conn=conn,
-        client=httpx.AsyncClient(timeout=10.0),
+        client=client,
         gamma_url=config["market_cache"]["gamma_url"],
         ttl_minutes=config["market_cache"]["ttl_minutes"],
+    )
+
+    prof_cfg = config["profiler"]
+    wallet_cache = WalletCache(
+        conn=conn,
+        client=client,
+        data_api_url=prof_cfg["data_api_url"],
+        ttl_minutes=prof_cfg["wallet_cache_ttl_minutes"],
+        max_trades=prof_cfg["max_trades_to_fetch"],
     )
 
     live = Live(_build_table(trade_buffer, trade_count, connected), refresh_per_second=4)
@@ -107,6 +149,14 @@ async def watch(config: dict[str, Any], conn: sqlite3.Connection) -> None:
             market = await market_cache.get_market(trade["condition_id"])
             if market:
                 trade["market_question"] = market.question
+
+        # Enrich with wallet profile (shallow — 1 HTTP call)
+        wallet_addr = trade.get("wallet")
+        if wallet_addr:
+            profile = await wallet_cache.get_profile(wallet_addr, depth="shallow")
+            if profile:
+                trade["wallet_trade_count"] = profile.trade_count
+                trade["wallet_is_fresh"] = profile.is_fresh
 
         # Persist
         db.insert_trade(conn, trade)
@@ -130,6 +180,87 @@ async def watch(config: dict[str, Any], conn: sqlite3.Connection) -> None:
                 await stream_task
             except asyncio.CancelledError:
                 pass
-            await market_cache._client.aclose()
+            await client.aclose()
 
     log.info("Watch stopped. %d trades recorded.", trade_count)
+
+
+async def wallet_lookup(config: dict[str, Any], conn: sqlite3.Connection, address: str) -> None:
+    """Deep-fetch a wallet profile and display it with recent trades."""
+    console = Console()
+
+    client = httpx.AsyncClient(timeout=15.0)
+    prof_cfg = config["profiler"]
+    wallet_cache = WalletCache(
+        conn=conn,
+        client=client,
+        data_api_url=prof_cfg["data_api_url"],
+        ttl_minutes=prof_cfg["wallet_cache_ttl_minutes"],
+        max_trades=prof_cfg["max_trades_to_fetch"],
+    )
+
+    try:
+        console.print(f"\n[dim]Fetching profile for[/] {address[:10]}...", end="")
+        profile = await wallet_cache.get_profile(address, depth="deep")
+
+        if not profile:
+            console.print(" [red]failed[/]")
+            console.print("[red]Could not fetch wallet profile. Check the address.[/]")
+            return
+
+        console.print(" [green]done[/]\n")
+
+        # Build profile panel
+        name_line = profile.display_name or profile.pseudonym or "[dim]anonymous[/]"
+        fresh_label = "[bold red]YES[/]" if profile.is_fresh else "[green]No[/]"
+
+        info = (
+            f"[bold]Address:[/]       {profile.proxy_wallet}\n"
+            f"[bold]Name:[/]          {name_line}\n"
+            f"[bold]Trade Count:[/]   {profile.trade_count}\n"
+            f"[bold]Unique Markets:[/] {profile.unique_markets}\n"
+            f"[bold]First Trade:[/]   {profile.first_trade_ts or 'unknown'}\n"
+            f"[bold]Fresh Wallet:[/]  {fresh_label}\n"
+            f"[bold]Profile Depth:[/] {profile.profile_depth}"
+        )
+        console.print(Panel(info, title="Wallet Profile", border_style="blue"))
+
+        # Fetch and display recent trades
+        recent = await wallet_cache.fetch_recent_trades(address, limit=20)
+        if recent:
+            table = Table(title="Recent Trades", expand=True)
+            table.add_column("Time", style="dim", width=19, no_wrap=True)
+            table.add_column("Market", ratio=1)
+            table.add_column("Side", width=4, no_wrap=True)
+            table.add_column("USDC", justify="right", width=10, no_wrap=True)
+            table.add_column("Price", justify="right", width=7, no_wrap=True)
+
+            for t in recent:
+                side = str(t.get("side", "")).upper()
+                side_text = Text(side)
+                if side == "BUY":
+                    side_text.stylize("green")
+                elif side == "SELL":
+                    side_text.stylize("red")
+
+                size = float(t.get("size", 0))
+                price = float(t.get("price", 0))
+                usdc = size * price
+
+                ts = t.get("timestamp") or t.get("matchTime") or ""
+                title = t.get("title") or t.get("conditionId", "")[:16] or ""
+
+                table.add_row(
+                    str(ts)[:19],
+                    title,
+                    side_text,
+                    _format_amount(usdc),
+                    _format_price(price),
+                )
+
+            console.print(table)
+        else:
+            console.print("[dim]No recent trades found.[/]")
+
+    finally:
+        await client.aclose()

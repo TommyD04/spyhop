@@ -9,7 +9,7 @@ import sys
 
 from spyhop.config import load_config, db_path
 from spyhop.storage.db import init_db
-from spyhop.cli import watch
+from spyhop.cli import watch, wallet_lookup
 
 
 def main() -> None:
@@ -26,6 +26,8 @@ def main() -> None:
 
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("watch", help="Stream whale trades in real time")
+    wallet_parser = sub.add_parser("wallet", help="Look up a wallet profile")
+    wallet_parser.add_argument("address", help="Proxy wallet address to look up")
 
     args = parser.parse_args()
 
@@ -50,6 +52,14 @@ def main() -> None:
     if args.command == "watch":
         try:
             asyncio.run(watch(config, conn))
+        except KeyboardInterrupt:
+            pass
+        finally:
+            conn.close()
+
+    elif args.command == "wallet":
+        try:
+            asyncio.run(wallet_lookup(config, conn, args.address))
         except KeyboardInterrupt:
             pass
         finally:

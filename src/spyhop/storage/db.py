@@ -30,8 +30,20 @@ CREATE TABLE IF NOT EXISTS markets (
     last_fetched    TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS wallets (
+    proxy_wallet    TEXT PRIMARY KEY,
+    display_name    TEXT,
+    pseudonym       TEXT,
+    trade_count     INTEGER NOT NULL DEFAULT 0,
+    first_trade_ts  TEXT,
+    unique_markets  INTEGER NOT NULL DEFAULT 0,
+    last_fetched    TEXT NOT NULL,
+    profile_depth   TEXT NOT NULL DEFAULT 'shallow'
+);
+
 CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_trades_condition ON trades(condition_id);
+CREATE INDEX IF NOT EXISTS idx_wallets_trade_count ON wallets(trade_count);
 """
 
 
@@ -68,6 +80,27 @@ def get_market(conn: sqlite3.Connection, condition_id: str) -> dict[str, Any] | 
         "SELECT * FROM markets WHERE condition_id = ?", (condition_id,)
     ).fetchone()
     return dict(row) if row else None
+
+
+def get_wallet(conn: sqlite3.Connection, proxy_wallet: str) -> dict[str, Any] | None:
+    """Fetch a cached wallet profile, or None if not found."""
+    row = conn.execute(
+        "SELECT * FROM wallets WHERE proxy_wallet = ?", (proxy_wallet,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_wallet(conn: sqlite3.Connection, wallet: dict[str, Any]) -> None:
+    """Insert or replace a wallet cache entry."""
+    conn.execute(
+        """INSERT OR REPLACE INTO wallets
+           (proxy_wallet, display_name, pseudonym, trade_count, first_trade_ts,
+            unique_markets, last_fetched, profile_depth)
+           VALUES (:proxy_wallet, :display_name, :pseudonym, :trade_count, :first_trade_ts,
+                   :unique_markets, :last_fetched, :profile_depth)""",
+        wallet,
+    )
+    conn.commit()
 
 
 def upsert_market(conn: sqlite3.Connection, market: dict[str, Any]) -> None:

@@ -17,6 +17,11 @@ DEFAULTS: dict[str, Any] = {
         "gamma_url": "https://gamma-api.polymarket.com",
         "ttl_minutes": 60,
     },
+    "profiler": {
+        "data_api_url": "https://data-api.polymarket.com",
+        "max_trades_to_fetch": 200,
+        "wallet_cache_ttl_minutes": 30,
+    },
     "display": {
         "max_rows": 50,
     },

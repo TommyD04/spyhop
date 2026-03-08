@@ -7,5 +7,10 @@ reconnect_delay_sec = 5         # Delay before WebSocket reconnect attempt
 gamma_url = "https://gamma-api.polymarket.com"
 ttl_minutes = 60                # Cache market metadata for 1 hour
 
+[profiler]
+data_api_url = "https://data-api.polymarket.com"
+max_trades_to_fetch = 200       # Max trades to paginate for deep profile
+wallet_cache_ttl_minutes = 30   # Cache wallet profiles for 30 min
+
 [display]
 max_rows = 50                   # Max trades shown in live table
