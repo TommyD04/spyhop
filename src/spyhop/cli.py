@@ -88,6 +88,15 @@ def _format_score(trade: dict[str, Any]) -> Text:
     return Text(label, style="dim")
 
 
+def _format_market(trade: dict[str, Any]) -> str:
+    """Market question with outcome appended, e.g. 'O/U 6.5 → Under'."""
+    question = trade.get("market_question", "") or trade.get("condition_id", "")[:12]
+    outcome = trade.get("outcome", "")
+    if outcome:
+        return f"{question} → {outcome}"
+    return question
+
+
 def _build_table(trades: deque[dict[str, Any]], trade_count: int, connected: bool) -> Table:
     """Build the Rich table from current trade buffer."""
     status = "[green]● Connected[/]" if connected else "[red]● Disconnected[/]"
@@ -128,7 +137,7 @@ def _build_table(trades: deque[dict[str, Any]], trade_count: int, connected: boo
             side_text,
             _format_amount(trade["usdc_size"]),
             _format_price(trade.get("price", 0)),
-            trade.get("market_question", "") or trade.get("condition_id", "")[:12],
+            _format_market(trade),
         )
 
     if not trades:
