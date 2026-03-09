@@ -197,11 +197,39 @@ Edge derived from superior analysis of public information — not illegal, but s
 - **Pre-event timing**: position taken hours/days before resolution, not minutes (insiders trade late; informed traders trade early when odds are mispriced)
 - **Historical P&L**: positive returns across resolved markets, but not impossibly so (60-70% accuracy vs insider's 90%+)
 
+### Resolution Proximity — Time-to-Resolve as a Signal Modifier
+
+The closer a market is to resolution, the more suspicious a high-scoring trade becomes. Insider information is **perishable** — it only exists when someone already knows the outcome. A fresh wallet betting $15K on "Iran ceasefire by June 30" in March is speculative; the same bet placed 48 hours before an announced deal is a red flag.
+
+**Proposed time bands**:
+
+| Time to Resolution | Label | Score Modifier | Rationale |
+|--------------------|-------|----------------|-----------|
+| > 30 days | `SPECULATIVE` | Dampen (0.5x) | Too far out for insider knowledge to exist; thesis-driven |
+| 7–30 days | `EARLY` | Neutral (1.0x) | Informed trader sweet spot — mispricing + analysis edge |
+| 1–7 days | `HOT` | Boost (1.5x) | Insider sweet spot — information exists, not yet public |
+| < 24 hours | `IMMINENT` | Boost (2.0x) | Highest insider risk, but also front-running public news |
+
+**Implementation considerations**:
+- Requires resolution date from Gamma API (`end_date_iso` or `closed` fields on the event/market)
+- Many markets don't have fixed end dates (e.g., "Will X happen by Y?" could resolve early on a YES outcome at any time)
+- For open-ended markets, use the stated deadline as the upper bound
+- Sports markets have known game times — high-precision resolution dates available
+- Political markets often have fixed dates (election day, hearing date) — moderate precision
+- Geopolitical/speculative markets ("ceasefire by June 30") — only the deadline is known, actual resolution could be any time before
+
+**Interaction with strategy types**:
+- `SPECULATIVE` + fresh wallet = likely just a gambler, not an insider. Dampen score.
+- `HOT` + fresh wallet + niche market = the classic insider pattern. Boost score.
+- `EARLY` + established wallet + category expertise = textbook `INFORMED`. Don't dampen — this is the signal you want to follow with moderate sizing.
+- `IMMINENT` + any wallet = could be insider OR someone reading breaking news faster. Requires cross-referencing with news timestamps to disambiguate.
+
 ### Classification Priority
 
 1. **FARM filter first** — suppress the noise (highest volume of false positives today)
-2. **INSIDER vs INFORMED separation second** — requires wallet history depth (Goldsky backfill) and win-rate tracking (resolution poller)
-3. **Category weighting third** — Politics/Crypto insider risk > Sports; adjust score multipliers by event category
+2. **Resolution proximity second** — dampen speculative long-dated bets, boost trades near resolution (requires market end-date data)
+3. **INSIDER vs INFORMED separation third** — requires wallet history depth (Goldsky backfill) and win-rate tracking (resolution poller)
+4. **Category weighting fourth** — Politics/Crypto insider risk > Sports; adjust score multipliers by event category
 
 ## Phasing
 

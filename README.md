@@ -82,6 +82,43 @@ spyhop history --limit 20         # last 20 signals
 
 Columns: timestamp, wallet, composite score, F/S/N multipliers (Fresh/Size/Niche), USDC amount, market.
 
+### Paper trading
+
+Spyhop can paper-trade alongside flagged whales to validate whether the detection signals are actually profitable. When enabled, trades scoring above the threshold automatically create simulated positions.
+
+Enable in `config.toml`:
+
+```toml
+[paper]
+enabled = true
+starting_capital = 100_000       # Simulated capital pool (USD)
+base_position_usd = 5_000       # Base position size before score scaling
+max_position_pct = 0.10          # Max 10% of capital per single position
+max_exposure_pct = 0.50          # Max 50% of capital deployed at once
+max_concurrent = 10              # Max simultaneous open positions
+min_score = 7.0                  # Minimum composite score to trigger entry
+```
+
+When active, `spyhop watch` shows a `$` suffix on scores that triggered paper entries (e.g. `7.2$`) and portfolio stats in the title bar.
+
+### View paper positions
+
+Show open paper positions with unrealized P&L:
+
+```bash
+spyhop positions              # uses cached market prices
+spyhop positions --refresh    # fetches live prices for mark-to-market
+```
+
+### Reset paper portfolio
+
+Clear all paper positions and start fresh:
+
+```bash
+spyhop paper-reset             # prompts for confirmation
+spyhop paper-reset --confirm   # skip prompt
+```
+
 ### Options
 
 ```
@@ -103,7 +140,7 @@ Spyhop stores data in a local SQLite database:
 - **Linux/macOS**: `~/.local/share/spyhop/spyhop.db`
 - **Windows**: `%LOCALAPPDATA%\spyhop\spyhop.db`
 
-Tables: `trades` (persisted whale trades), `markets` (Gamma API cache), `wallets` (Data API profile cache), `signals` (detection scores).
+Tables: `trades` (persisted whale trades), `markets` (Gamma API cache), `wallets` (Data API profile cache), `signals` (detection scores), `paper_positions` (simulated trades).
 
 ## Architecture
 

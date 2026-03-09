@@ -55,6 +55,15 @@ DEFAULTS: dict[str, Any] = {
     "display": {
         "max_rows": 50,
     },
+    "paper": {
+        "enabled": False,
+        "starting_capital": 100_000,
+        "base_position_usd": 5_000,
+        "max_position_pct": 0.10,
+        "max_exposure_pct": 0.50,
+        "max_concurrent": 10,
+        "min_score": 7.0,
+    },
 }
 
 

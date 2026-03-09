@@ -71,6 +71,30 @@ CREATE INDEX IF NOT EXISTS idx_trades_condition ON trades(condition_id);
 CREATE INDEX IF NOT EXISTS idx_wallets_trade_count ON wallets(trade_count);
 CREATE INDEX IF NOT EXISTS idx_signals_score ON signals(composite_score DESC);
 CREATE INDEX IF NOT EXISTS idx_signals_trade ON signals(trade_id);
+
+CREATE TABLE IF NOT EXISTS paper_positions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_id        INTEGER NOT NULL REFERENCES trades(id),
+    signal_id       INTEGER NOT NULL REFERENCES signals(id),
+    condition_id    TEXT    NOT NULL,
+    market_question TEXT,
+    outcome         TEXT    NOT NULL,
+    outcome_index   INTEGER NOT NULL DEFAULT 0,
+    side            TEXT    NOT NULL DEFAULT 'BUY',
+    entry_price     REAL    NOT NULL,
+    size_usd        REAL    NOT NULL,
+    token_qty       REAL    NOT NULL,
+    score_at_entry  REAL    NOT NULL,
+    wallet          TEXT    NOT NULL,
+    status          TEXT    NOT NULL DEFAULT 'OPEN',
+    entry_timestamp TEXT    NOT NULL,
+    exit_price      REAL,
+    exit_timestamp  TEXT,
+    realized_pnl    REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_paper_status ON paper_positions(status);
+CREATE INDEX IF NOT EXISTS idx_paper_condition ON paper_positions(condition_id);
 """
 
 
@@ -204,3 +228,64 @@ def get_recent_signals(
         (min_score, limit),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── Paper position helpers ──────────────────────────────────────────
+
+
+def insert_paper_position(conn: sqlite3.Connection, position: dict[str, Any]) -> int:
+    """Insert a paper position. Returns the row ID."""
+    cur = conn.execute(
+        """INSERT INTO paper_positions
+           (trade_id, signal_id, condition_id, market_question, outcome,
+            outcome_index, side, entry_price, size_usd, token_qty,
+            score_at_entry, wallet, entry_timestamp)
+           VALUES (:trade_id, :signal_id, :condition_id, :market_question, :outcome,
+                   :outcome_index, :side, :entry_price, :size_usd, :token_qty,
+                   :score_at_entry, :wallet, :entry_timestamp)""",
+        position,
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def get_open_positions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Return all open paper positions."""
+    rows = conn.execute(
+        "SELECT * FROM paper_positions WHERE status = 'OPEN' ORDER BY id DESC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def count_open_positions(conn: sqlite3.Connection) -> int:
+    """Return count of open paper positions."""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM paper_positions WHERE status = 'OPEN'"
+    ).fetchone()
+    return row[0]
+
+
+def sum_deployed_capital(conn: sqlite3.Connection) -> float:
+    """Return total USD deployed in open paper positions."""
+    row = conn.execute(
+        "SELECT COALESCE(SUM(size_usd), 0.0) FROM paper_positions WHERE status = 'OPEN'"
+    ).fetchone()
+    return row[0]
+
+
+def has_position_on(conn: sqlite3.Connection, condition_id: str, outcome: str) -> bool:
+    """Check if there's already an open position on this condition+outcome."""
+    row = conn.execute(
+        """SELECT 1 FROM paper_positions
+           WHERE condition_id = ? AND outcome = ? AND status = 'OPEN'
+           LIMIT 1""",
+        (condition_id, outcome),
+    ).fetchone()
+    return row is not None
+
+
+def delete_all_paper_positions(conn: sqlite3.Connection) -> int:
+    """Delete all paper positions. Returns count deleted."""
+    cur = conn.execute("DELETE FROM paper_positions")
+    conn.commit()
+    return cur.rowcount

@@ -75,13 +75,18 @@ def _format_mult(val: float | None) -> Text:
 
 
 def _format_score(trade: dict[str, Any]) -> Text:
-    """Format composite suspicion score with alert highlighting."""
+    """Format composite suspicion score with alert highlighting.
+
+    Appends '$' if the trade triggered a paper entry.
+    """
     score = trade.get("score")
     if score is None or score == 0:
         return Text("-", style="dim")
     label = f"{score:.1f}"
+    if trade.get("paper_entry"):
+        label += "$"
     if score >= 9:
-        return Text(f"{label}!", style="bold red")
+        return Text(f"{label}!" if not trade.get("paper_entry") else label, style="bold red")
     if score >= 7:
         return Text(label, style="bold yellow")
     if score >= 4:
@@ -115,10 +120,19 @@ def _format_market(trade: dict[str, Any]) -> str:
     return question
 
 
-def _build_table(trades: deque[dict[str, Any]], trade_count: int, connected: bool) -> Table:
+def _build_table(
+    trades: deque[dict[str, Any]],
+    trade_count: int,
+    connected: bool,
+    paper_stats: dict[str, Any] | None = None,
+) -> Table:
     """Build the Rich table from current trade buffer."""
     status = "[green]● Connected[/]" if connected else "[red]● Disconnected[/]"
     title = f"Spyhop — Whale Tracker  {status}  |  {trade_count} trades"
+    if paper_stats:
+        count = paper_stats["open_count"]
+        deployed = paper_stats["deployed"]
+        title += f"  |  {count} pos, ${deployed:,.0f} deployed"
 
     table = Table(title=title, expand=True, show_lines=False)
     table.add_column("Time", style="dim", width=8, no_wrap=True)
@@ -207,10 +221,19 @@ async def watch(config: dict[str, Any], conn: sqlite3.Connection) -> None:
 
     scorer = build_scorer(config)
 
-    live = Live(_build_table(trade_buffer, trade_count, connected), refresh_per_second=4)
+    # Paper trading — lazy import, zero overhead when disabled
+    paper_trader = None
+    paper_stats: dict[str, Any] | None = None
+    if config.get("paper", {}).get("enabled", False):
+        from spyhop.paper.trader import PaperTrader
+        paper_trader = PaperTrader(config, conn)
+        paper_stats = paper_trader.get_summary_stats()
+
+    live = Live(_build_table(trade_buffer, trade_count, connected, paper_stats),
+                refresh_per_second=4)
 
     async def handle_trade(trade: dict[str, Any]) -> None:
-        nonlocal trade_count, connected
+        nonlocal trade_count, connected, paper_stats
         connected = True
 
         # Enrich with market metadata — always fetch for detector context
@@ -248,6 +271,7 @@ async def watch(config: dict[str, Any], conn: sqlite3.Connection) -> None:
         trade_id = db.insert_trade(conn, trade)
 
         # Persist signal if any detector fired
+        signal_id = None
         if score_result.composite > 0:
             # Map detector names to DB column prefixes
             _col_map = {"fresh_wallet": "fresh", "size_anomaly": "size",
@@ -263,12 +287,25 @@ async def watch(config: dict[str, Any], conn: sqlite3.Connection) -> None:
                 col = _col_map.get(r.name, r.name)
                 sig[f"{col}_mult"] = r.multiplier
                 sig[f"{col}_detail"] = r.detail
-            db.insert_signal(conn, sig)
+            signal_id = db.insert_signal(conn, sig)
+
+        # Paper trading
+        if paper_trader:
+            paper_result = paper_trader.maybe_trade(
+                trade, score_result, trade_id, signal_id
+            )
+            if paper_result and paper_result.executed:
+                trade["paper_entry"] = True
 
         # Update display buffer
         trade_buffer.appendleft(trade)
         trade_count += 1
-        live.update(_build_table(trade_buffer, trade_count, connected))
+
+        # Refresh paper stats periodically
+        if paper_trader and (trade_count % 10 == 0 or trade.get("paper_entry")):
+            paper_stats = paper_trader.get_summary_stats()
+
+        live.update(_build_table(trade_buffer, trade_count, connected, paper_stats))
 
     with live:
         stream_task = asyncio.create_task(stream_trades(config, handle_trade))
@@ -423,3 +460,143 @@ async def history_view(
         )
 
     console.print(table)
+
+
+async def positions_view(
+    config: dict[str, Any],
+    conn: sqlite3.Connection,
+    refresh: bool = False,
+) -> None:
+    """Display open paper trading positions with optional mark-to-market."""
+    import json
+
+    console = Console()
+    positions = db.get_open_positions(conn)
+
+    if not positions:
+        console.print("[dim]No open paper positions.[/]")
+        return
+
+    # Build market prices from cached data (or refresh from API)
+    market_prices: dict[str, list[float]] = {}
+    if refresh:
+        client = httpx.AsyncClient(timeout=10.0)
+        from spyhop.profiler.market import MarketCache
+        market_cache = MarketCache(
+            conn=conn,
+            client=client,
+            gamma_url=config["market_cache"]["gamma_url"],
+            ttl_minutes=0,  # force refresh
+        )
+        try:
+            for pos in positions:
+                cid = pos["condition_id"]
+                if cid not in market_prices:
+                    market = await market_cache.get_market(cid)
+                    if market and market.outcome_prices:
+                        market_prices[cid] = market.outcome_prices
+        finally:
+            await client.aclose()
+    else:
+        # Read cached prices from markets table
+        for pos in positions:
+            cid = pos["condition_id"]
+            if cid not in market_prices:
+                cached = db.get_market(conn, cid)
+                if cached and cached.get("outcome_prices"):
+                    try:
+                        prices = json.loads(cached["outcome_prices"])
+                        market_prices[cid] = [float(p) for p in prices]
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        pass
+
+    # Build table
+    table = Table(title="Paper Positions (OPEN)", expand=True)
+    table.add_column("Entry Time", style="dim", width=19, no_wrap=True)
+    table.add_column("Market", ratio=1)
+    table.add_column("Outcome", width=12, no_wrap=True)
+    table.add_column("Entry", justify="right", width=7, no_wrap=True)
+    table.add_column("Current", justify="right", width=7, no_wrap=True)
+    table.add_column("Size", justify="right", width=10, no_wrap=True)
+    table.add_column("Unrealized", justify="right", width=10, no_wrap=True)
+    table.add_column("Score", justify="right", width=5, no_wrap=True)
+
+    total_deployed = 0.0
+    total_unrealized = 0.0
+
+    for pos in positions:
+        entry_price = pos["entry_price"]
+        token_qty = pos["token_qty"]
+        size_usd = pos["size_usd"]
+        total_deployed += size_usd
+
+        # Get current price
+        prices = market_prices.get(pos["condition_id"])
+        current_price = None
+        if prices and len(prices) > pos["outcome_index"]:
+            current_price = prices[pos["outcome_index"]]
+
+        # Calculate unrealized P&L
+        current_display = "\u2014"
+        unrealized_display = Text("\u2014", style="dim")
+        if current_price is not None:
+            unrealized = (current_price - entry_price) * token_qty
+            total_unrealized += unrealized
+            current_display = f"{current_price * 100:.1f}\u00a2"
+            pnl_str = f"${unrealized:+,.0f}"
+            style = "green" if unrealized >= 0 else "red"
+            unrealized_display = Text(pnl_str, style=style)
+
+        question = pos.get("market_question", "") or pos["condition_id"][:20]
+
+        table.add_row(
+            pos["entry_timestamp"][:19],
+            question[:50],
+            pos["outcome"][:12],
+            f"{entry_price * 100:.1f}\u00a2",
+            current_display,
+            f"${size_usd:,.0f}",
+            unrealized_display,
+            f"{pos['score_at_entry']:.1f}",
+        )
+
+    console.print(table)
+
+    # Summary panel
+    capital = config.get("paper", {}).get("starting_capital", 100_000)
+    available = capital - total_deployed
+    pnl_style = "green" if total_unrealized >= 0 else "red"
+    pnl_str = f"${total_unrealized:+,.0f}"
+
+    summary = (
+        f"[bold]Starting Capital:[/]  ${capital:,.0f}\n"
+        f"[bold]Deployed:[/]          ${total_deployed:,.0f}\n"
+        f"[bold]Available:[/]         ${available:,.0f}\n"
+        f"[bold]Open Positions:[/]    {len(positions)}\n"
+        f"[bold]Unrealized P&L:[/]    [{pnl_style}]{pnl_str}[/]"
+    )
+    console.print(Panel(summary, title="Portfolio Summary", border_style="blue"))
+
+
+def paper_reset(conn: sqlite3.Connection, confirm: bool = False) -> None:
+    """Delete all paper positions after confirmation."""
+    console = Console()
+
+    count = db.count_open_positions(conn)
+    total = conn.execute("SELECT COUNT(*) FROM paper_positions").fetchone()[0]
+
+    if total == 0:
+        console.print("[dim]No paper positions to reset.[/]")
+        return
+
+    if not confirm:
+        console.print(
+            f"[yellow]This will delete {total} paper positions ({count} open).[/]"
+        )
+        response = input("Type 'yes' to confirm: ")
+        if response.strip().lower() != "yes":
+            console.print("[dim]Cancelled.[/]")
+            return
+
+    deleted = db.delete_all_paper_positions(conn)
+    console.print(f"[green]Deleted {deleted} paper positions.[/]")

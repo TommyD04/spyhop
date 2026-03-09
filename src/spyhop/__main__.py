@@ -9,7 +9,7 @@ import sys
 
 from spyhop.config import load_config, db_path
 from spyhop.storage.db import init_db
-from spyhop.cli import watch, wallet_lookup, history_view
+from spyhop.cli import watch, wallet_lookup, history_view, positions_view, paper_reset
 
 
 def main() -> None:
@@ -34,6 +34,18 @@ def main() -> None:
     )
     history_parser.add_argument(
         "--limit", type=int, default=50, help="Max signals to show (default: 50)"
+    )
+
+    positions_parser = sub.add_parser("positions", help="Show open paper trading positions")
+    positions_parser.add_argument(
+        "--refresh", action="store_true",
+        help="Fetch fresh market prices for mark-to-market"
+    )
+
+    reset_parser = sub.add_parser("paper-reset", help="Reset paper trading portfolio")
+    reset_parser.add_argument(
+        "--confirm", action="store_true",
+        help="Skip confirmation prompt"
     )
 
     args = parser.parse_args()
@@ -75,6 +87,22 @@ def main() -> None:
     elif args.command == "history":
         try:
             asyncio.run(history_view(config, conn, limit=args.limit, min_score=args.min_score))
+        except KeyboardInterrupt:
+            pass
+        finally:
+            conn.close()
+
+    elif args.command == "positions":
+        try:
+            asyncio.run(positions_view(config, conn, refresh=args.refresh))
+        except KeyboardInterrupt:
+            pass
+        finally:
+            conn.close()
+
+    elif args.command == "paper-reset":
+        try:
+            paper_reset(conn, confirm=args.confirm)
         except KeyboardInterrupt:
             pass
         finally:
