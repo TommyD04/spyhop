@@ -236,68 +236,73 @@ async def watch(config: dict[str, Any], conn: sqlite3.Connection) -> None:
         nonlocal trade_count, connected, paper_stats
         connected = True
 
-        # Enrich with market metadata — always fetch for detector context
-        market = None
-        cid = trade.get("condition_id")
-        if cid:
-            market = await market_cache.get_market(cid, slug=trade.get("market_slug", ""))
-            if market and not trade.get("market_question"):
-                trade["market_question"] = market.question
+        try:
+            # Enrich with market metadata — always fetch for detector context
+            market = None
+            cid = trade.get("condition_id")
+            if cid:
+                market = await market_cache.get_market(cid, slug=trade.get("market_slug", ""))
+                if market and not trade.get("market_question"):
+                    trade["market_question"] = market.question
 
-        # Enrich with event category tag
-        event_slug = trade.get("event_slug")
-        if event_slug:
-            event = await event_cache.get_event(event_slug)
-            if event:
-                trade["primary_tag"] = event.primary_tag
+            # Enrich with event category tag
+            event_slug = trade.get("event_slug")
+            if event_slug:
+                event = await event_cache.get_event(event_slug)
+                if event:
+                    trade["primary_tag"] = event.primary_tag
 
-        # Enrich with wallet profile (shallow — 1 HTTP call)
-        profile = None
-        wallet_addr = trade.get("wallet")
-        if wallet_addr:
-            profile = await wallet_cache.get_profile(wallet_addr, depth="shallow")
-            if profile:
-                trade["wallet_trade_count"] = profile.trade_count
-                trade["wallet_is_fresh"] = profile.is_fresh
+            # Enrich with wallet profile (shallow — 1 HTTP call)
+            profile = None
+            wallet_addr = trade.get("wallet")
+            if wallet_addr:
+                profile = await wallet_cache.get_profile(wallet_addr, depth="shallow")
+                if profile:
+                    trade["wallet_trade_count"] = profile.trade_count
+                    trade["wallet_is_fresh"] = profile.is_fresh
 
-        # Score (synchronous — no I/O, pure arithmetic)
-        context = DetectionContext(trade=trade, wallet_profile=profile, market=market)
-        score_result = scorer.score(context)
-        trade["score"] = score_result.composite
-        for sig in score_result.signals:
-            trade[f"{sig.name}_mult"] = sig.multiplier
+            # Score (synchronous — no I/O, pure arithmetic)
+            context = DetectionContext(trade=trade, wallet_profile=profile, market=market)
+            score_result = scorer.score(context)
+            trade["score"] = score_result.composite
+            for sig in score_result.signals:
+                trade[f"{sig.name}_mult"] = sig.multiplier
 
-        # Persist trade
-        trade_id = db.insert_trade(conn, trade)
+            # Persist trade
+            trade_id = db.insert_trade(conn, trade)
 
-        # Persist signal if any detector fired
-        signal_id = None
-        if score_result.composite > 0:
-            # Map detector names to DB column prefixes
-            _col_map = {"fresh_wallet": "fresh", "size_anomaly": "size",
-                        "niche_market": "niche"}
-            sig = {"trade_id": trade_id, "timestamp": trade["timestamp"],
-                   "composite_score": score_result.composite,
-                   "fresh_mult": 1.0, "fresh_detail": "",
-                   "size_mult": 1.0, "size_detail": "",
-                   "niche_mult": 1.0, "niche_detail": "",
-                   "is_alert": int(score_result.alert),
-                   "is_critical": int(score_result.critical)}
-            for r in score_result.signals:
-                col = _col_map.get(r.name, r.name)
-                sig[f"{col}_mult"] = r.multiplier
-                sig[f"{col}_detail"] = r.detail
-            signal_id = db.insert_signal(conn, sig)
+            # Persist signal if any detector fired
+            signal_id = None
+            if score_result.composite > 0:
+                # Map detector names to DB column prefixes
+                _col_map = {"fresh_wallet": "fresh", "size_anomaly": "size",
+                            "niche_market": "niche"}
+                sig = {"trade_id": trade_id, "timestamp": trade["timestamp"],
+                       "composite_score": score_result.composite,
+                       "fresh_mult": 1.0, "fresh_detail": "",
+                       "size_mult": 1.0, "size_detail": "",
+                       "niche_mult": 1.0, "niche_detail": "",
+                       "is_alert": int(score_result.alert),
+                       "is_critical": int(score_result.critical)}
+                for r in score_result.signals:
+                    col = _col_map.get(r.name, r.name)
+                    sig[f"{col}_mult"] = r.multiplier
+                    sig[f"{col}_detail"] = r.detail
+                signal_id = db.insert_signal(conn, sig)
 
-        # Paper trading
-        if paper_trader:
-            paper_result = paper_trader.maybe_trade(
-                trade, score_result, trade_id, signal_id
-            )
-            if paper_result and paper_result.executed:
-                trade["paper_entry"] = True
+            # Paper trading
+            if paper_trader:
+                paper_result = paper_trader.maybe_trade(
+                    trade, score_result, trade_id, signal_id
+                )
+                if paper_result and paper_result.executed:
+                    trade["paper_entry"] = True
 
-        # Update display buffer
+        except Exception:
+            log.exception("handle_trade error for %s — skipping",
+                          trade.get("condition_id", "?")[:12])
+
+        # Always update display buffer even if enrichment/scoring failed
         trade_buffer.appendleft(trade)
         trade_count += 1
 

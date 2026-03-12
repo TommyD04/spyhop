@@ -81,6 +81,26 @@ async def _pinger(ws) -> None:
         pass
 
 
+async def _silence_watchdog(ws, last_data: list[float], timeout: float) -> None:
+    """Independent task that forces reconnect when data stream freezes.
+
+    Must run as a separate asyncio task — checking for silence inside
+    ``async for msg in ws`` is dead code during actual silence because
+    the loop is blocked waiting for the next message.
+    """
+    try:
+        while True:
+            await asyncio.sleep(timeout / 3)
+            elapsed = asyncio.get_event_loop().time() - last_data[0]
+            if elapsed > timeout:
+                log.warning("Silence watchdog: no data for %ds — forcing reconnect",
+                            int(elapsed))
+                await ws.close()
+                return
+    except (asyncio.CancelledError, websockets.ConnectionClosed):
+        pass
+
+
 async def stream_trades(
     config: dict[str, Any],
     on_trade: Callable[[dict[str, Any]], Awaitable[None]],
@@ -96,6 +116,7 @@ async def stream_trades(
 
     while True:
         ping_task = None
+        watchdog_task = None
         try:
             log.info("Connecting to RTDS: %s", ws_url)
             async with connect(ws_url) as ws:
@@ -104,7 +125,12 @@ async def stream_trades(
 
                 # Start application-level keepalive
                 ping_task = asyncio.create_task(_pinger(ws))
-                last_data = asyncio.get_event_loop().time()
+
+                # Mutable ref so the message loop can update, watchdog can read
+                last_data = [asyncio.get_event_loop().time()]
+                watchdog_task = asyncio.create_task(
+                    _silence_watchdog(ws, last_data, SILENCE_TIMEOUT)
+                )
 
                 async for raw_msg in ws:
                     # Skip empty acks and pong responses
@@ -120,12 +146,8 @@ async def stream_trades(
                     if not isinstance(msg, dict) or "payload" not in msg:
                         continue
 
-                    # Update silence tracker
-                    now = asyncio.get_event_loop().time()
-                    if now - last_data > SILENCE_TIMEOUT:
-                        log.warning("No data for %ds — forcing reconnect", SILENCE_TIMEOUT)
-                        break
-                    last_data = now
+                    # Update silence tracker (read by watchdog task)
+                    last_data[0] = asyncio.get_event_loop().time()
 
                     payload = msg["payload"]
                     if not isinstance(payload, dict):
@@ -133,7 +155,10 @@ async def stream_trades(
 
                     trade = _parse_trade(payload)
                     if trade and trade["usdc_size"] >= threshold:
-                        await on_trade(trade)
+                        try:
+                            await on_trade(trade)
+                        except Exception:
+                            log.exception("on_trade callback error — continuing stream")
 
         except websockets.ConnectionClosed as e:
             log.warning("WebSocket closed: %s — reconnecting in %ds", e, delay)
@@ -143,9 +168,13 @@ async def stream_trades(
             log.info("Stream cancelled, shutting down")
             if ping_task:
                 ping_task.cancel()
+            if watchdog_task:
+                watchdog_task.cancel()
             return
         finally:
             if ping_task:
                 ping_task.cancel()
+            if watchdog_task:
+                watchdog_task.cancel()
 
         await asyncio.sleep(delay)

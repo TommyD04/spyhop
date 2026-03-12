@@ -32,60 +32,70 @@ class PaperTrader:
         score_result: ScoreResult,
         trade_id: int,
         signal_id: int | None,
-    ) -> PaperTradeResult | None:
-        """Evaluate a scored trade for paper entry. Returns None if below threshold."""
-        if score_result.composite < self._min_score:
-            return None
-        if signal_id is None:
-            return None
+    ) -> PaperTradeResult:
+        """Evaluate a scored trade for paper entry.
 
-        # Normalize SELL → BUY opposite outcome
-        side = trade.get("side", "BUY")
-        outcome = trade.get("outcome", "")
-        outcome_index = trade.get("outcome_index", 0)
-        entry_price = trade.get("price", 0.0)
+        Always returns a PaperTradeResult — never raises. Errors are logged
+        and returned as executed=False so one bad trade cannot kill the stream.
+        """
+        try:
+            if score_result.composite < self._min_score:
+                return PaperTradeResult(executed=False, reason="below min_score")
+            if signal_id is None:
+                return PaperTradeResult(executed=False, reason="no signal")
 
-        if side == "SELL":
-            outcome_index = 1 - outcome_index  # flip to opposite
-            entry_price = 1.0 - entry_price
-            outcome = f"!{outcome}" if outcome else "Opposite"
+            # Normalize SELL → BUY opposite outcome
+            side = trade.get("side", "BUY")
+            outcome = trade.get("outcome", "")
+            outcome_index = trade.get("outcome_index", 0)
+            entry_price = trade.get("price", 0.0)
 
-        condition_id = trade.get("condition_id", "")
-        decision = self._risk.evaluate(condition_id, outcome, score_result.composite)
+            if side == "SELL":
+                outcome_index = 1 - outcome_index  # flip to opposite
+                entry_price = 1.0 - entry_price
+                outcome = f"!{outcome}" if outcome else "Opposite"
 
-        if not decision.allowed:
-            log.debug("Paper trade rejected: %s", decision.reject_reason)
-            return PaperTradeResult(executed=False, reason=decision.reject_reason)
+            condition_id = trade.get("condition_id", "")
+            decision = self._risk.evaluate(condition_id, outcome, score_result.composite)
 
-        token_qty = decision.position_size_usd / entry_price if entry_price > 0 else 0
+            if not decision.allowed:
+                log.info("Paper trade rejected: %s (score=%.1f, %s)",
+                         decision.reject_reason, score_result.composite,
+                         condition_id[:12])
+                return PaperTradeResult(executed=False, reason=decision.reject_reason)
 
-        entry = PaperEntry(
-            trade_id=trade_id,
-            signal_id=signal_id,
-            condition_id=condition_id,
-            market_question=trade.get("market_question", ""),
-            outcome=outcome,
-            outcome_index=outcome_index,
-            side="BUY",
-            entry_price=entry_price,
-            size_usd=decision.position_size_usd,
-            token_qty=token_qty,
-            score_at_entry=score_result.composite,
-            wallet=trade.get("wallet", ""),
-            entry_timestamp=trade.get("timestamp", ""),
-        )
+            token_qty = decision.position_size_usd / entry_price if entry_price > 0 else 0
 
-        position_id = self._executor.execute(entry)
-        log.info(
-            "Paper entry: pos=%d, %s, $%.0f @ %.2f¢, score=%.1f",
-            position_id, condition_id[:12], decision.position_size_usd,
-            entry_price * 100, score_result.composite,
-        )
-        return PaperTradeResult(
-            executed=True,
-            position_id=position_id,
-            size_usd=decision.position_size_usd,
-        )
+            entry = PaperEntry(
+                trade_id=trade_id,
+                signal_id=signal_id,
+                condition_id=condition_id,
+                market_question=trade.get("market_question", ""),
+                outcome=outcome,
+                outcome_index=outcome_index,
+                side="BUY",
+                entry_price=entry_price,
+                size_usd=decision.position_size_usd,
+                token_qty=token_qty,
+                score_at_entry=score_result.composite,
+                wallet=trade.get("wallet", ""),
+                entry_timestamp=trade.get("timestamp", ""),
+            )
+
+            position_id = self._executor.execute(entry)
+            log.info(
+                "Paper entry: pos=%d, %s, $%.0f @ %.2f¢, score=%.1f",
+                position_id, condition_id[:12], decision.position_size_usd,
+                entry_price * 100, score_result.composite,
+            )
+            return PaperTradeResult(
+                executed=True,
+                position_id=position_id,
+                size_usd=decision.position_size_usd,
+            )
+        except Exception:
+            log.exception("Paper trade error for trade_id=%s — skipping", trade_id)
+            return PaperTradeResult(executed=False, reason="internal error")
 
     def get_summary_stats(self) -> dict[str, Any]:
         """Lightweight DB query for dashboard title stats."""
