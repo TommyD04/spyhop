@@ -78,9 +78,18 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return merged
 
 
+def _project_root() -> Path:
+    """Resolve the project root (where config.toml lives next to pyproject.toml)."""
+    return Path(__file__).resolve().parent.parent.parent
+
+
 def _search_paths() -> list[Path]:
     """Return config file search paths in priority order."""
     paths = [Path("config.toml")]
+    # Project root — works regardless of CWD when installed via pip install -e
+    root_config = _project_root() / "config.toml"
+    if root_config.resolve() != Path("config.toml").resolve():
+        paths.append(root_config)
     if sys.platform == "win32":
         appdata = Path.home() / "AppData" / "Roaming" / "spyhop"
         paths.append(appdata / "config.toml")
@@ -92,7 +101,7 @@ def _search_paths() -> list[Path]:
 def load_config(path: Path | None = None) -> dict[str, Any]:
     """Load config from file, falling back to built-in defaults.
 
-    Search order: explicit path → ./config.toml → ~/.config/spyhop/config.toml → defaults only.
+    Search order: explicit path → ./config.toml → project root → user config dir → defaults only.
     """
     if path is not None:
         with open(path, "rb") as f:
