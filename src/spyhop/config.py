@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import tomllib
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 DEFAULTS: dict[str, Any] = {
     "ingestor": {
@@ -105,13 +108,16 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     """
     if path is not None:
         with open(path, "rb") as f:
+            log.info("Loaded config from %s", path)
             return _deep_merge(DEFAULTS, tomllib.load(f))
 
     for candidate in _search_paths():
         if candidate.exists():
             with open(candidate, "rb") as f:
+                log.info("Loaded config from %s", candidate.resolve())
                 return _deep_merge(DEFAULTS, tomllib.load(f))
 
+    log.warning("No config.toml found; using built-in defaults")
     return DEFAULTS.copy()
 
 

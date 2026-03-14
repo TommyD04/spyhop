@@ -258,6 +258,8 @@ The closer a market is to resolution, the more suspicious a high-scoring trade b
 - [ ] Historical win-rate analysis via Goldsky subgraphs
 - [ ] Wallet tagging / watchlist system
 - [ ] Reward farmer detection: tag matched buy-sell pairs (same wallet, same market, <N min apart) as `FARM` to filter noise from genuine directional trades. Observed pattern: rotating wallets doing single round-trips on high-reward near-certainty markets (e.g., Fed rate at 99.8¢), losing ~0.1¢/token to harvest `clobRewards` liquidity incentives.
+- [ ] Per-category exposure limits (max 20% of bankroll per category — prevents correlated bets, e.g., all UFC fights resolving same night). Source: RQ4 §6.2, SYNTHESIS.md §1.1
+- [ ] Daily/weekly loss circuit breakers (10%/20% of bankroll) and consecutive-loss pause (3 losses). Requires V5 resolution data
 - [ ] Category-weighted scoring (Politics/Crypto insider risk > Sports)
 - [ ] Tag-based filtering (e.g., "only show Politics")
 
@@ -273,6 +275,7 @@ The closer a market is to resolution, the more suspicious a high-scoring trade b
 ```
 spyhop/
 ├── CLAUDE.md
+├── CONFIG_REFERENCE.md      # Every config.toml parameter: how it works, tuning guidance, research citations
 ├── pyproject.toml
 ├── config.toml              # User-configurable thresholds
 ├── src/
@@ -326,6 +329,12 @@ Before writing ad-hoc Python to query the SQLite database, check if an existing 
 - `spyhop history --min-score 7` — show scored signals
 - `spyhop wallet <addr>` — deep wallet lookup
 - `spyhop watch` — live stream
+
+### Config loading & CWD sensitivity
+- `load_config()` searches: `./config.toml` → project root → user config dir → built-in defaults
+- When installed via `pip install -e .` and run from a different CWD, `./config.toml` won't match — the project-root fallback (`_project_root()`) handles this
+- `config.py` logs at INFO which file was loaded, or WARNING if falling through to defaults — check startup logs if config values seem wrong
+- Silent fallback to defaults is the most common cause of "paper trading won't enable" — `paper.enabled` defaults to `False`
 
 ### Windows environment quirks
 - **User's shell is PowerShell** — always give PowerShell-compatible commands, not Unix/bash (e.g., `Get-Content file -Wait` not `tail -f`, `Select-String` not `grep`)
