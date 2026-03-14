@@ -50,4 +50,4 @@ base_position_usd = 5_000       # Base position size before score scaling
 max_position_pct = 0.10          # Max 10% of capital per single position
 max_exposure_pct = 0.50          # Max 50% of capital deployed at once
 max_concurrent = 10              # Max simultaneous open positions
-min_score = 5.0                  # Minimum composite score to trigger entry
+min_score = 3.0                  # Minimum composite score to trigger entry

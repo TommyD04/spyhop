@@ -328,6 +328,7 @@ Before writing ad-hoc Python to query the SQLite database, check if an existing 
 - `spyhop watch` — live stream
 
 ### Windows environment quirks
+- **User's shell is PowerShell** — always give PowerShell-compatible commands, not Unix/bash (e.g., `Get-Content file -Wait` not `tail -f`, `Select-String` not `grep`)
 - No `sqlite3` CLI available — use Python's `sqlite3` module or the spyhop CLI
 - When running inline Python via bash, use heredoc (`python3 << 'PYEOF'`) to avoid f-string/dict-key quoting conflicts
 - DB path: `C:/Users/thoma/AppData/Local/spyhop/spyhop.db`
