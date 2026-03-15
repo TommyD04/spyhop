@@ -2,17 +2,19 @@
 
 ## Status
 
-**Phase**: Research complete. Signal quality improvements (Q1–Q3, Q5) implemented. Core MM filter (Layers 0–2) proposed but **not yet approved** — open reservations on approach require further exploration before implementation.
-**Data window**: 2026-03-06 to 2026-03-15 (9 days, ~10K trades)
+**Phase**: Research ongoing. Signal quality improvements (Q1–Q3, Q5) implemented. Core MM filter (Layers 0–2) proposed but **not yet approved** — §12 investigation of multi-wallet transaction mechanics significantly revised the understanding of both-side trading and invalidated key assumptions behind the original filter design.
+**Data window**: 2026-03-06 to 2026-03-15 (9 days, ~11K trades)
 **Limitation**: Single-week sample. Patterns should be validated over 2–3 additional weeks before calibrating final thresholds.
 
 ---
 
 ## 1. Problem Statement
 
-Spyhop's composite scorer (fresh wallet × size anomaly × niche market) identifies large, unusual trades as potential insider signals. The paper trader then follows these signals. However, some high-scoring trades come from wallets that are **trading both sides of the same market** — whether through professional market-making, reward farming, or in-play hedging. None of these behaviors express directional conviction. Following one leg of a hedged pair earns zero edge minus spread, wasting position slots and capital.
+Spyhop's composite scorer (fresh wallet × size anomaly × niche market) identifies large, unusual trades as potential insider signals. The paper trader then follows these signals. However, some high-scoring trades come from wallets that are **trading both sides of the same market** — whether through professional market-making, reward farming, or in-play hedging.
 
-This analysis examines the empirical prevalence, structure, and behavioral signatures of both-side trading in the live Spyhop dataset to design a detection and exclusion mechanism ("MM filter") for the paper trading pipeline. The term "MM" is used inclusively to cover all both-side behaviors — thoughtful market-making, reward farming, and dynamic hedging are different motivations but produce the same signal contamination.
+This analysis examines the empirical prevalence, structure, and behavioral signatures of both-side trading in the live Spyhop dataset. The original goal was to design a detection and exclusion mechanism ("MM filter") for the paper trading pipeline. However, the §12 investigation of multi-wallet transaction mechanics revealed that much of the apparent both-side activity is an artifact of CLOB settlement, and that some genuine both-side wallets are sophisticated in-play bettors whose signals may be *valuable* rather than noise. The MM filter design remains open pending further analysis.
+
+> **Important**: §1–§10 were written before the §12 findings. Some conclusions in those sections — particularly the assumption that all both-side activity is non-directional noise — have been partially invalidated. Read §12 for the revised understanding.
 
 ---
 
@@ -359,6 +361,102 @@ This is conceptually the inverse of FARM filtering — instead of *excluding* no
 4. **Irrational betting volume** — crypto attracts speculative gambling behavior (micro-binary markets are essentially slot machines). High volume ≠ high signal.
 
 **Status: Implemented** — `blocked_categories = ["Crypto"]` in `config.toml`. PaperTrader rejects trades whose `primary_tag` matches a blocked category. Check occurs before resolution proximity and risk engine evaluation. Configurable: set to `[]` to disable.
+
+---
+
+## 12. Transaction Hash Investigation: Revised Understanding of Both-Side Activity
+
+### 12.1 Origin
+
+Three trades at `2026-03-15T05:12:51` all scored >9.0 (F=3.0 × S=3.0 × N=2.0) on "Games Total: O/U 2.5":
+- Wallet `0x3C3D` — BUY Over $10K × 2 fills
+- Wallet `0x5116` — BUY Under $10K × 1 fill
+
+All three shared the same `tx_hash` (`0x777c027...`). Initial hypothesis: same operator, two puppet wallets, wash trading. Investigation revealed this hypothesis was **mostly wrong**.
+
+### 12.2 CLOB Settlement Mechanics
+
+Polymarket's CLOB settles matched orders on Polygon. When a large taker order fills against multiple maker limit orders, **all fills settle in a single on-chain transaction** (one `tx_hash`). In a binary market:
+
+- BUY Yes@0.73 = SELL No@0.27
+- A taker buying $1M of Yes tokens fills against makers who had limit sells on Yes AND/OR limit buys on No
+- All of these fills appear in the same `tx_hash` with different `proxyWallet` addresses
+
+**Consequence**: Different wallets in the same `tx_hash` are typically independent makers and takers, not puppet wallets of one operator.
+
+### 12.3 Evidence
+
+| Test | Finding | Implication |
+|:-----|:--------|:------------|
+| Price complementarity | Prices in opposite-side multi-wallet TXs sum to exactly 1.000 in every case | Binary market settlement, not puppet coordination |
+| Imbalance distribution | 124/340 heavily imbalanced (>50%), 174 moderately, only 8 balanced (<5%) | Reflects taker/maker liquidity ratio, not hedging |
+| Size distribution | One side has 1 wallet with large fills (taker); other side has 3-5 wallets with smaller, varied fills (makers) | Classic CLOB batch fill pattern |
+| Same-side TXs | 401 same-side vs 370 opposite-side multi-wallet TXs; same-side almost all at $0.999 | Multiple makers on same side being swept by one taker |
+| Hub wallet solo TXs | Top hub `0x2a2C` has 124 solo TXs + 89 multi-wallet TXs | Trades independently too — not a pure puppet |
+| Volume | 67.7% of all DB volume ($216M / $319M) comes from wallets appearing in multi-wallet TXs | Too prevalent to be a niche manipulation pattern — this is normal market operation |
+
+### 12.4 The Hub Wallet (0x2a2C) Is an In-Play Sports Bettor
+
+Data API deep fetch (844 trades) revealed the hub wallet is **not** a market maker. It's a sophisticated in-play bettor:
+
+**Trading pattern**: Takes an initial directional position, then adjusts 5-15 minutes later as live events unfold. Example — PSG match (2026-03-11):
+- 19:45 — BUY Yes (PSG to win) $114K
+- 19:50 — BUY No (PSG NOT to win) $201K *(game state changed)*
+- 19:55 — More No $120K
+- 19:58 — BUY Yes $35K *(adjusting again)*
+- 20:01 — BUY No $50K
+
+**Net position is always heavily directional** — 73-100% one-sided by USD across all 16 both-side markets. The "opposite side" trades are adjustments, not hedges.
+
+**"Probe" trades are tiny** — $3 to $838 on the opposite side. These are either CLOB settlement artifacts or order book depth tests, not meaningful positions.
+
+**Price profile is sophisticated**:
+
+| Price Regime | Hub Wallet | General Population |
+|:-------------|:-----------|:-------------------|
+| Near-certainty (>90¢) | 11% | 55% |
+| Favored (60-90¢) | 31% | 18% |
+| Toss-up (40-60¢) | 53% | 24% |
+| Underdog (10-40¢) | 3% | 3% |
+
+The general population concentrates on near-certainty bets (55%). The hub wallet concentrates on toss-ups (53%) — where genuine uncertainty (and potential edge) exists.
+
+### 12.5 Impact on the $10K Display Threshold
+
+The investigation confirmed that sub-threshold trades exist but are **not balancing trades** in the expected sense:
+- CLOB batch settlements include maker fills on both sides; some individual fills may be <$10K
+- The hub wallet's probe trades ($3-$838) are invisible to the tracker but are not meaningful positions
+- At $0.999 prices, the implied counterparty value is negligible ($157-$756 opposite a $156K-$515K fill)
+- **No evidence that lowering the threshold would reveal hidden hedging** — the imbalances are real, not artifacts of the display filter
+
+### 12.6 Impact on Proposed MM Filter
+
+The three-layer MM filter proposed in §10 was designed under the assumption that both-side activity = non-directional noise. The §12 findings significantly weaken this assumption:
+
+| Proposed Layer | Impact |
+|:---------------|:-------|
+| **Layer 0 (portfolio anti-hedge)** | Still valid in principle — the paper trader shouldn't bet both sides. But the original reservation stands: blocking the second side while keeping the first is arbitrary and could randomly increase risk. |
+| **Layer 1 (real-time lookback)** | **Would produce false positives.** The hub wallet's in-play adjustments (e.g., switching from PSG Yes to PSG No after a goal) would trigger the lookback, causing the filter to reject a potentially informed position change. The filter cannot distinguish "noise hedge" from "informed in-play adjustment." |
+| **Layer 2 (wallet reputation)** | **Would flag the most interesting wallet in the dataset.** The hub wallet trades both sides on 16+ markets — well above the 2-market threshold. Flagging it would suppress exactly the signal that might be most worth following. |
+
+### 12.7 Revised Questions
+
+The original question was "how do we filter out MM noise?" The investigation suggests the better questions are:
+
+1. **Can we distinguish reward farming from in-play adjustment?** Reward farming is balanced (net exposure ~0%), short-duration (<2 min), and at near-certainty prices. In-play adjustment is heavily directional (>70% net), longer-duration (5-90 min), and at uncertain prices (40-60¢). These are structurally different.
+
+2. **Is the hub wallet profitable?** If yes, this is exactly the signal to follow — a sophisticated live bettor reacting to game information faster than the market. Requires V5 resolution data to answer.
+
+3. **Can we detect in-play position changes in real-time and ride along?** The hub wallet's RTDS trades are visible. If their adjustments precede price movement, there's a tail-the-sharp opportunity. This is a different thesis than insider detection — it's "follow the informed in-play bettor."
+
+4. **How do we handle the original 0x3C3D + 0x5116 pair?** Both wallets have zero prior history and appeared in the same settlement TX on opposite sides of a 50/50 market. This could be: (a) two independent fresh bettors matched by the CLOB, or (b) one operator using disposable wallets. With zero API history on both, we can't distinguish. But at 50¢/50¢ this is a coin flip, not an insider signal regardless.
+
+### 12.8 What Did NOT Change
+
+- **Reward farming (§1-§3)** remains a real pattern. Round-trip wash trades with near-zero net exposure still contaminate the signal pipeline.
+- **The $POLY incentive structure** still motivates volume inflation.
+- **The signal quality improvements (Q1-Q5)** are all valid and should remain.
+- **The $10K threshold is appropriate** — sub-threshold trades are not hiding meaningful hedging activity.
 
 ---
 

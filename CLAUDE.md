@@ -254,9 +254,9 @@ The closer a market is to resolution, the more suspicious a high-scoring trade b
 
 **Must complete before advancing to V5 or any other Phase 2 work.**
 
-Both-side trading — whether professional market-making, reward farming, or in-play hedging — contaminates the signal pipeline. None of these behaviors express directional conviction, which is the foundation of the insider/informed thesis. Empirical analysis of 9 days of data identified 39 hedge pairs across 20 wallets, overwhelmingly on live sports markets. Two wallets alone account for ~60% of hedged volume ($4.2M combined) and are professional-scale operators (400–800+ trades, 175–442 unique markets).
+Both-side trading was initially assumed to be non-directional noise (market-making, reward farming, in-play hedging). However, the §12 investigation of multi-wallet transaction mechanics (2026-03-15) significantly revised this understanding. Most apparent both-side activity is actually normal CLOB batch settlement — different wallets in the same `tx_hash` are independent makers and takers, not coordinated puppet wallets. Furthermore, the most prolific "both-side" wallet in the dataset (`0x2a2C`, 844 trades) turned out to be a sophisticated in-play sports bettor making informed directional adjustments, not a market maker.
 
-See `research/V4B_FARM_DETECTION.md` for full analysis, behavioral clusters, and proposed heuristics.
+See `research/V4B_FARM_DETECTION.md` for full analysis: §1–§10 cover original empirical findings; §12 covers the tx_hash investigation that revised the conclusions.
 
 **Completed work (signal quality improvements):**
 - [x] Q1: Bumped shallow wallet profile limit from 6 to 25 (single API call, enables MM vs. newcomer distinction). Invalidated 1,619 stale cache entries.
@@ -264,27 +264,26 @@ See `research/V4B_FARM_DETECTION.md` for full analysis, behavioral clusters, and
 - [x] Q3: Resolution proximity filter — hard 30-day cutoff (`max_days_to_resolution` in config.toml). Markets table stores `end_date` from Gamma API `endDateIso`. PaperTrader rejects trades on markets resolving >30 days out.
 - [x] Q5: Category blocklist — `blocked_categories = ["Crypto"]` in config.toml. Crypto is 91% 5-minute binary micro-markets (BTC/SOL/ETH Up or Down) at $0.99 avg price — no insider edge, pure noise.
 
-**Proposed MM filter (three-layer defense) — NOT YET APPROVED FOR IMPLEMENTATION:**
+**Proposed MM filter (three-layer defense) — ON HOLD, PARTIALLY INVALIDATED:**
 
-The following plan unifies the original two-layer FARM defense with the anti-hedge filter (previously Phase 2). All three address the same root problem: both-side activity at different levels.
+The original three-layer proposal assumed both-side activity = non-directional noise. The §12 findings weakened this assumption:
 
-- [ ] **Layer 0 — Portfolio anti-hedge**: Prevent the paper trader from holding both sides of the same market. Currently `risk.py` only blocks duplicate `condition_id + outcome`; a second whale on the *opposite* outcome passes through, guaranteeing a spread loss. Proposed fix: reject if any open position shares the same `condition_id`, regardless of outcome.
-- [ ] **Layer 1 — Real-time lookback**: Before paper trade entry, check if the incoming wallet has traded the opposite outcome on the same `condition_id` within a configurable window (e.g., 30 min). If yes, this wallet is MM-ing, not expressing conviction. Reject.
-- [ ] **Layer 2 — Wallet reputation**: When Layer 1 catches a wallet on 2+ distinct markets, flag the wallet as a serial MM operator. Suppress all future paper trades from flagged wallets.
-- [ ] Re-validate thresholds after 3 weeks of data collection.
+- [ ] **Layer 0 — Portfolio anti-hedge**: Prevent the paper trader from holding both sides of the same market. **Still conceptually valid** but the approach (block second entry) is arbitrary — the second signal may be stronger/more informed than the first. Open question: should the system close the first position instead, or reject both?
+- [ ] **Layer 1 — Real-time lookback**: Check if incoming wallet traded opposite outcome on same condition_id recently. **Would produce false positives** — the §12 hub wallet's in-play adjustments (switching sides after game events) would be incorrectly flagged. The filter cannot distinguish "noise hedge" from "informed in-play adjustment."
+- [ ] **Layer 2 — Wallet reputation**: Flag wallets caught on 2+ markets. **Would flag the most interesting wallet in the dataset** — the hub wallet trades both sides on 16+ markets but is heavily directional (73-100% one-sided) on each. Suppressing it would remove potentially valuable signal.
 
-**Open reservations (must resolve before implementing):**
+**Key insight from §12**: The right question is not "how do we filter out both-side wallets" but "how do we distinguish reward farming (balanced, near-certainty, <2 min) from informed in-play adjustment (directional, uncertain prices, 5-90 min)?" These are structurally different behaviors.
 
-1. **Layer 0 is arbitrary.** Blocking the second side while keeping the first open is a coin flip — the first entry might be the wrong side. This could randomly increase risk rather than reduce it. Need to think through: should we close the *first* position instead? Should we block both and take neither? Does the score of the second trade matter (higher score = stronger conviction = maybe the first was wrong)?
-
-2. **Execution timing is underspecified.** Layers 1 and 2 imply the paper trader has time to "look back" before executing, but the current flow is synchronous: trade arrives → score → maybe_trade → done. There's no explicit delay, but the lookback query adds a dependency on *previous* trades being already persisted. Need to map the exact data flow: when does the incoming trade get inserted vs. when does the lookback query run? Could we miss a hedge pair if both sides arrive in the same batch? The logic and sequencing need to be clearly articulated before writing code.
-
-3. **Serial MM detection needs more exploration.** The 2-market threshold for Layer 2 is proposed but not validated. Questions: How many wallets in the current DB would be flagged? What's the false positive rate (legitimate traders who hedged twice)? Do flagged wallets ever produce genuine insider signals? Should the flag decay over time? Should we run a retrospective analysis against existing data before building the persistence layer?
+**Revised open questions:**
+1. Can we distinguish reward farming (net exposure ~0%, near-certainty prices) from in-play adjustment (net exposure >70%, toss-up prices) using structural heuristics?
+2. Is the hub wallet (`0x2a2C`) profitable? Requires V5 resolution data. If profitable, this is a "follow the sharp" signal, not noise to filter.
+3. Can we detect in-play position changes in real-time and ride along? ("Tail the sharp in-play bettor" — a different thesis than insider detection.)
+4. What fraction of both-side activity is genuine reward farming (balanced round-trips) vs CLOB settlement artifacts vs in-play adjustment?
 
 **Deferred (separate workstream):**
 - [ ] Q4: Niche market low-odds outsized bets — undeveloped thesis on tailing high-conviction low-probability signals. Would be a different thesis engine, not this filter.
 
-**Data limitation**: Current analysis covers 2026-03-06 to 2026-03-15 (9 days). Continue collecting data during implementation to validate pattern persistence.
+**Data limitation**: Current analysis covers 2026-03-06 to 2026-03-15 (9 days). Continue collecting data. V5 resolution data is prerequisite for answering profitability questions.
 
 ### Phase 2 — Enhanced Detection (next — after V4b)
 - [x] V4: Paper trading (risk engine + PaperExecutor)
