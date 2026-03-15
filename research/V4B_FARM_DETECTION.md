@@ -339,9 +339,26 @@ This is conceptually the inverse of FARM filtering — instead of *excluding* no
 
 ### Q5: Crypto category exclusion
 
-**Problem**: Crypto trades generate high composite scores but carry zero insider signal. 91.5% of crypto signals are 5-minute binary "Up or Down" micro-markets (BTC, SOL, ETH direction bets). Average entry price $0.99 — near-certainty bets where no information asymmetry exists. 40 of 42 crypto wallets are high-volume operators (trade_count at ceiling), consistent with market-making or arbitrage, not insider behavior.
+**Problem**: Crypto trades generate high composite scores but carry zero insider signal. The investment thesis behind spyhop — detecting insider or informed trading via fresh wallets making outsized niche bets — does not apply to the Crypto category as observed on Polymarket.
 
-**Status: Implemented** — `blocked_categories = ["Crypto"]` in `config.toml`. PaperTrader rejects trades whose `primary_tag` matches a blocked category. Configurable: set to `[]` to disable.
+**Empirical evidence** (2026-03-06 to 2026-03-15, 120 trades, $2.55M volume):
+
+| Finding | Detail |
+|:--------|:-------|
+| Market composition | 91.5% of crypto signals (108/118) are 5-minute binary "Up or Down" micro-markets (BTC, SOL, ETH) |
+| Entry prices | Average $0.99 — traders buying the near-certain winning side moments before resolution |
+| Wallet profiles | 40 of 42 crypto wallets hit trade_count ceiling (high-volume operators, not insiders) |
+| Information asymmetry | None exists for "will BTC go up in the next 5 minutes" — this is noise trading, gambling, or cross-exchange arbitrage |
+| Remaining 8.5% | "Satoshi moving BTC" (novelty), "BTC ATH by June" (long-shot speculation), MicroStrategy derivative — none fit insider thesis |
+| Paper positions | Zero opened in crypto (score threshold kept them out, but only by luck) |
+
+**Why this doesn't fit the investment thesis:**
+1. **No insider edge** — nobody has advance knowledge of Bitcoin's 5-minute direction. Unlike political events or sports outcomes, short-term crypto price movements are effectively random noise.
+2. **Near-certainty pricing** — $0.99 entry prices mean the outcome is already known (or near-known). These are not conviction bets on uncertain outcomes; they're arbitrage or reward farming.
+3. **Operator profiles** — the wallets are high-volume, multi-market operators. The same behavioral cluster as the sports market-makers identified in §5 of this paper.
+4. **Irrational betting volume** — crypto attracts speculative gambling behavior (micro-binary markets are essentially slot machines). High volume ≠ high signal.
+
+**Status: Implemented** — `blocked_categories = ["Crypto"]` in `config.toml`. PaperTrader rejects trades whose `primary_tag` matches a blocked category. Check occurs before resolution proximity and risk engine evaluation. Configurable: set to `[]` to disable.
 
 ---
 

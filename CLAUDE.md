@@ -182,7 +182,7 @@ True non-public information — someone knows the outcome before the market does
 - Fresh wallet + large position + niche market (the current composite scorer)
 - **One-directional**: no hedging, no round-trip — conviction trade
 - **Timing**: position taken shortly before resolution or major news
-- **Market category**: Politics and Crypto carry higher insider risk than Sports (Sports outcomes are harder to know in advance outside match-fixing)
+- **Market category**: Politics carries higher insider risk than Sports (Sports outcomes are harder to know in advance outside match-fixing). Crypto is excluded — empirical data shows 91% of crypto signals are 5-min binary micro-markets with no insider edge (see V4b Q5).
 - **Win rate anomaly**: statistically improbable accuracy across resolved markets (Phase 2, requires Goldsky backfill)
 - **Funding chain**: wallet funded shortly before trade, from a mixer or fresh source (Phase 2)
 
@@ -193,7 +193,7 @@ Edge derived from superior analysis of public information — not illegal, but s
 **Distinguishing signals**:
 - **Established wallet** with moderate trade history (NOT fresh — they have a track record)
 - **Concentrated position**: large size on a specific outcome, but from a wallet with proven accuracy
-- **Category expertise**: wallet history shows specialization (e.g., only trades Crypto markets, or only French politics)
+- **Category expertise**: wallet history shows specialization (e.g., only trades French politics, or only specific sports leagues). Note: Crypto excluded from paper trading (V4b Q5) — no informed-trader signal in micro-binary markets.
 - **Pre-event timing**: position taken hours/days before resolution, not minutes (insiders trade late; informed traders trade early when odds are mispriced)
 - **Historical P&L**: positive returns across resolved markets, but not impossibly so (60-70% accuracy vs insider's 90%+)
 
@@ -229,7 +229,7 @@ The closer a market is to resolution, the more suspicious a high-scoring trade b
 1. **FARM filter first** — suppress the noise (highest volume of false positives today)
 2. **Resolution proximity second** — dampen speculative long-dated bets, boost trades near resolution (requires market end-date data)
 3. **INSIDER vs INFORMED separation third** — requires wallet history depth (Goldsky backfill) and win-rate tracking (resolution poller)
-4. **Category weighting fourth** — Politics/Crypto insider risk > Sports; adjust score multipliers by event category
+4. **Category weighting fourth** — Crypto excluded entirely (V4b Q5); future: score multipliers by remaining event categories (Politics insider risk > Sports)
 
 ## Phasing
 
@@ -284,7 +284,7 @@ See `research/V4B_FARM_DETECTION.md` for full analysis, behavioral clusters, and
 - [x] **Resolution proximity filter**: hard 30-day cutoff implemented in V4b Q3. `max_days_to_resolution = 30` in config.toml. Score dampening (SPECULATIVE/EARLY/HOT/IMMINENT bands) deferred to future refinement.
 - [ ] Per-category exposure limits (max 20% of bankroll per category — prevents correlated bets, e.g., all UFC fights resolving same night). Source: RQ4 §6.2, SYNTHESIS.md §1.1
 - [ ] Daily/weekly loss circuit breakers (10%/20% of bankroll) and consecutive-loss pause (3 losses). Requires V5 resolution data
-- [ ] Category-weighted scoring (Politics/Crypto insider risk > Sports)
+- [ ] Category-weighted scoring (Crypto already excluded via V4b Q5; future: Politics insider risk > Sports score adjustments)
 - [ ] Tag-based filtering (e.g., "only show Politics")
 
 ### Phase 3 — TUI & Live Trading
