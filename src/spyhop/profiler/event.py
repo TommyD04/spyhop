@@ -51,16 +51,24 @@ class EventCache:
         return datetime.now(timezone.utc) - fetched < self._ttl
 
     async def get_event(self, event_slug: str) -> Event | None:
-        """Look up event metadata, hitting Gamma API on cache miss/expiry."""
+        """Look up event metadata, hitting Gamma API on cache miss/expiry.
+
+        Uses a two-step strategy:
+        1. Exact match on event_slug (fast, indexed).
+        2. Prefix fallback — market slugs often have outcome-specific suffixes
+           (e.g. 'ucl-psg1-cfc1-2026-03-11-psg1') that don't match the parent
+           event slug ('ucl-psg1-cfc1-2026-03-11').  The prefix lookup finds the
+           longest cached event slug that is a prefix of the given slug.
+        """
         if not event_slug:
             return None
 
-        # Check cache
+        # Step 1: exact cache hit
         cached = db.get_event(self._conn, event_slug)
         if cached and self._is_fresh(cached):
             return self._row_to_event(cached)
 
-        # Fetch from Gamma API
+        # Step 2: try Gamma API with the full slug (works when slug IS an event)
         event = await self._fetch_from_gamma(event_slug)
         if event:
             db.upsert_event(self._conn, {
@@ -70,7 +78,14 @@ class EventCache:
                 "primary_tag": event.primary_tag,
                 "last_fetched": datetime.now(timezone.utc).isoformat(),
             })
-        return event
+            return event
+
+        # Step 3: prefix fallback — check if a cached event is a prefix of this slug
+        cached = db.get_event_by_prefix(self._conn, event_slug)
+        if cached and self._is_fresh(cached):
+            return self._row_to_event(cached)
+
+        return None
 
     async def _fetch_from_gamma(self, event_slug: str) -> Event | None:
         """Fetch event from Gamma API via GET /events?slug=<slug>."""

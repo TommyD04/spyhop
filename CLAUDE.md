@@ -250,14 +250,37 @@ The closer a market is to resolution, the more suspicious a high-scoring trade b
 - [x] Cat column in dashboard (Politics, Sports, Crypto, Economy)
 - [x] Outcome display in market column (e.g. "O/U 6.5 → Under")
 
-### Phase 2 — Enhanced Detection (next)
-- [ ] V4: Paper trading (risk engine + PaperExecutor)
+### V4b — FARM Detection (CURRENT PRIORITY — week of 2026-03-14)
+
+**Must complete before advancing to V5 or any other Phase 2 work.**
+
+Both-side trading (market-making / reward farming) contaminates the signal pipeline. Empirical analysis of 9 days of data identified 39 hedge pairs across 20 wallets, overwhelmingly on live sports markets. Two wallets alone account for ~60% of hedged volume ($4.2M combined) and are professional-scale operators (400–800+ trades, 175–442 unique markets) masked by the shallow profile ceiling.
+
+See `research/V4B_FARM_DETECTION.md` for full analysis, behavioral clusters, and proposed heuristics.
+
+**Implementation plan (two-layer defense):**
+- [ ] Layer 1: Real-time lookback — before paper trade entry, check if wallet has traded the opposite outcome on the same condition_id within the last 30 minutes. Reject if yes.
+- [ ] Layer 2: Wallet reputation — flag wallets caught by Layer 1 on 2+ distinct markets. Suppress all future paper trades from flagged wallets.
+- [ ] Re-validate thresholds after 3 weeks of data collection
+
+**Adjacent open questions (also tracked in V4B_FARM_DETECTION.md §11):**
+- [x] Q1: Bumped shallow wallet profile limit from 6 to 25 (single API call, enables MM vs. newcomer distinction). Invalidated 1,619 stale cache entries.
+- [x] Q2: Fix event category slug mismatch — two-step lookup (exact then prefix) in EventCache.get_event() and db.get_event_by_prefix(). Coverage: 29% → 69%.
+- [ ] Q3: Resolution proximity filter — store `end_date_iso` from Gamma API, implement SPECULATIVE/EARLY/HOT/IMMINENT score modifiers (research exists in SYNTHESIS.md §2.1)
+- [ ] Q4: Niche market low-odds outsized bets — undeveloped thesis on tailing high-conviction low-probability signals. Needs further thought.
+
+**Data limitation**: Current analysis covers 2026-03-06 to 2026-03-15 (9 days). Continue collecting data during implementation to validate pattern persistence.
+
+### Phase 2 — Enhanced Detection (next — after V4b)
+- [x] V4: Paper trading (risk engine + PaperExecutor)
 - [ ] V5: P&L tracking (resolution poller)
 - [ ] DBSCAN temporal clustering (coordinated wallet timing)
 - [ ] Funding chain tracing (Polygon RPC: where did wallet funds come from?)
 - [ ] Historical win-rate analysis via Goldsky subgraphs
 - [ ] Wallet tagging / watchlist system
 - [ ] Reward farmer detection: tag matched buy-sell pairs (same wallet, same market, <N min apart) as `FARM` to filter noise from genuine directional trades. Observed pattern: rotating wallets doing single round-trips on high-reward near-certainty markets (e.g., Fed rate at 99.8¢), losing ~0.1¢/token to harvest `clobRewards` liquidity incentives.
+- [ ] **Anti-hedge filter**: risk engine currently only blocks duplicate (same condition_id + same outcome). It allows taking BOTH sides of the same market (e.g., Celtics AND Wizards on the same spread), which is a guaranteed loss to the spread. Fix: reject entry if any open position shares the same condition_id, regardless of outcome. Observed 2026-03-14 smoke test: positions #10/#11 (Celtics spread both sides), #12/#13 (Hurricanes both sides), #5/#6 (AD Cali both sides)
+- [ ] **Resolution proximity filter**: skip markets that don't resolve for months. Observed 2026-03-14: paper trader entered a GOP house control bet that doesn't resolve for ~8 months — no insider edge exists that far out, it's just speculation. Aligns with SYNTHESIS.md resolution proximity proposal (SPECULATIVE band >30 days → dampen 0.5x or skip entirely). Could implement as a hard cutoff (e.g., skip if resolution >60 days) or as the score dampening modifier from the research
 - [ ] Per-category exposure limits (max 20% of bankroll per category — prevents correlated bets, e.g., all UFC fights resolving same night). Source: RQ4 §6.2, SYNTHESIS.md §1.1
 - [ ] Daily/weekly loss circuit breakers (10%/20% of bankroll) and consecutive-loss pause (3 losses). Requires V5 resolution data
 - [ ] Category-weighted scoring (Politics/Crypto insider risk > Sports)

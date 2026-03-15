@@ -92,11 +92,16 @@ class WalletCache:
         return profile
 
     async def _fetch_shallow(self, wallet: str) -> WalletProfile | None:
-        """Single request: GET /trades?user=<addr>&limit=6."""
+        """Single request: GET /trades?user=<addr>&limit=25.
+
+        Limit=25 (up from 6) gives resolution above the fresh-wallet
+        threshold (<=5) without adding pagination.  Wallets returning 25
+        trades are likely high-volume operators — useful for FARM detection.
+        """
         try:
             resp = await self._client.get(
                 f"{self._data_api_url}/trades",
-                params={"user": wallet, "limit": 6},
+                params={"user": wallet, "limit": 25},
             )
             resp.raise_for_status()
             trades = resp.json()

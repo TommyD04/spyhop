@@ -202,6 +202,23 @@ def get_event(conn: sqlite3.Connection, event_slug: str) -> dict[str, Any] | Non
     return dict(row) if row else None
 
 
+def get_event_by_prefix(conn: sqlite3.Connection, market_slug: str) -> dict[str, Any] | None:
+    """Fetch a cached event whose slug is a prefix of the given market slug.
+
+    Returns the longest (most specific) matching event to handle cases where
+    both a base event and a '-more-markets' variant exist.  Returns None if
+    no event slug is a prefix of *market_slug*.
+    """
+    row = conn.execute(
+        """SELECT * FROM events
+           WHERE ? LIKE event_slug || '%'
+           ORDER BY LENGTH(event_slug) DESC
+           LIMIT 1""",
+        (market_slug,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
 def upsert_event(conn: sqlite3.Connection, event: dict[str, Any]) -> None:
     """Insert or replace an event cache entry."""
     conn.execute(
