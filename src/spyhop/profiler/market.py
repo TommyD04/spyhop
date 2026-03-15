@@ -24,6 +24,7 @@ class Market:
     volume: float
     volume_24hr: float
     outcome_prices: str  # JSON string, e.g. '[0.62, 0.38]'
+    end_date: str | None = None  # ISO date from Gamma API endDateIso
 
 
 class MarketCache:
@@ -67,6 +68,7 @@ class MarketCache:
                 "volume": market.volume,
                 "volume_24hr": market.volume_24hr,
                 "outcome_prices": market.outcome_prices,
+                "end_date": market.end_date,
                 "last_fetched": datetime.now(timezone.utc).isoformat(),
             })
         return market
@@ -111,6 +113,7 @@ class MarketCache:
                         volume=0.0,
                         volume_24hr=0.0,  # CLOB doesn't provide volume
                         outcome_prices="[]",
+                        end_date=None,  # CLOB doesn't provide end date
                     )
             except httpx.HTTPError:
                 pass
@@ -131,6 +134,7 @@ class MarketCache:
             volume=float(raw.get("volume", 0) or 0),
             volume_24hr=float(raw.get("volume24hr", raw.get("volume_24hr", 0)) or 0),
             outcome_prices=outcome_prices,
+            end_date=raw.get("endDateIso") or raw.get("end_date") or None,
         )
 
     @staticmethod
@@ -142,4 +146,5 @@ class MarketCache:
             volume=row["volume"] or 0.0,
             volume_24hr=row["volume_24hr"] or 0.0,
             outcome_prices=row["outcome_prices"] or "[]",
+            end_date=row.get("end_date"),
         )

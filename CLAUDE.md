@@ -266,7 +266,7 @@ See `research/V4B_FARM_DETECTION.md` for full analysis, behavioral clusters, and
 **Adjacent open questions (also tracked in V4B_FARM_DETECTION.md §11):**
 - [x] Q1: Bumped shallow wallet profile limit from 6 to 25 (single API call, enables MM vs. newcomer distinction). Invalidated 1,619 stale cache entries.
 - [x] Q2: Fix event category slug mismatch — two-step lookup (exact then prefix) in EventCache.get_event() and db.get_event_by_prefix(). Coverage: 29% → 69%.
-- [ ] Q3: Resolution proximity filter — store `end_date_iso` from Gamma API, implement SPECULATIVE/EARLY/HOT/IMMINENT score modifiers (research exists in SYNTHESIS.md §2.1)
+- [x] Q3: Resolution proximity filter — hard 30-day cutoff (`max_days_to_resolution` in config.toml). Markets table stores `end_date` from Gamma API `endDateIso`. PaperTrader rejects trades on markets resolving >30 days out.
 - [ ] Q4: Niche market low-odds outsized bets — undeveloped thesis on tailing high-conviction low-probability signals. Needs further thought.
 
 **Data limitation**: Current analysis covers 2026-03-06 to 2026-03-15 (9 days). Continue collecting data during implementation to validate pattern persistence.
@@ -280,7 +280,7 @@ See `research/V4B_FARM_DETECTION.md` for full analysis, behavioral clusters, and
 - [ ] Wallet tagging / watchlist system
 - [ ] Reward farmer detection: tag matched buy-sell pairs (same wallet, same market, <N min apart) as `FARM` to filter noise from genuine directional trades. Observed pattern: rotating wallets doing single round-trips on high-reward near-certainty markets (e.g., Fed rate at 99.8¢), losing ~0.1¢/token to harvest `clobRewards` liquidity incentives.
 - [ ] **Anti-hedge filter**: risk engine currently only blocks duplicate (same condition_id + same outcome). It allows taking BOTH sides of the same market (e.g., Celtics AND Wizards on the same spread), which is a guaranteed loss to the spread. Fix: reject entry if any open position shares the same condition_id, regardless of outcome. Observed 2026-03-14 smoke test: positions #10/#11 (Celtics spread both sides), #12/#13 (Hurricanes both sides), #5/#6 (AD Cali both sides)
-- [ ] **Resolution proximity filter**: skip markets that don't resolve for months. Observed 2026-03-14: paper trader entered a GOP house control bet that doesn't resolve for ~8 months — no insider edge exists that far out, it's just speculation. Aligns with SYNTHESIS.md resolution proximity proposal (SPECULATIVE band >30 days → dampen 0.5x or skip entirely). Could implement as a hard cutoff (e.g., skip if resolution >60 days) or as the score dampening modifier from the research
+- [x] **Resolution proximity filter**: hard 30-day cutoff implemented in V4b Q3. `max_days_to_resolution = 30` in config.toml. Score dampening (SPECULATIVE/EARLY/HOT/IMMINENT bands) deferred to future refinement.
 - [ ] Per-category exposure limits (max 20% of bankroll per category — prevents correlated bets, e.g., all UFC fights resolving same night). Source: RQ4 §6.2, SYNTHESIS.md §1.1
 - [ ] Daily/weekly loss circuit breakers (10%/20% of bankroll) and consecutive-loss pause (3 losses). Requires V5 resolution data
 - [ ] Category-weighted scoring (Politics/Crypto insider risk > Sports)

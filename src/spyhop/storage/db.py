@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS markets (
     volume          REAL,
     volume_24hr     REAL,
     outcome_prices  TEXT,
+    end_date        TEXT,
     last_fetched    TEXT NOT NULL
 );
 
@@ -100,9 +101,13 @@ CREATE INDEX IF NOT EXISTS idx_paper_condition ON paper_positions(condition_id);
 
 def _migrate(conn: sqlite3.Connection) -> None:
     """Add columns to existing tables that predate V3."""
-    for col, typ in [("outcome", "TEXT"), ("outcome_index", "INTEGER")]:
+    for table, col, typ in [
+        ("trades", "outcome", "TEXT"),
+        ("trades", "outcome_index", "INTEGER"),
+        ("markets", "end_date", "TEXT"),
+    ]:
         try:
-            conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {typ}")
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
             pass  # Column already exists
 
@@ -171,8 +176,8 @@ def upsert_market(conn: sqlite3.Connection, market: dict[str, Any]) -> None:
     """Insert or replace a market cache entry."""
     conn.execute(
         """INSERT OR REPLACE INTO markets
-           (condition_id, question, slug, volume, volume_24hr, outcome_prices, last_fetched)
-           VALUES (:condition_id, :question, :slug, :volume, :volume_24hr, :outcome_prices, :last_fetched)""",
+           (condition_id, question, slug, volume, volume_24hr, outcome_prices, end_date, last_fetched)
+           VALUES (:condition_id, :question, :slug, :volume, :volume_24hr, :outcome_prices, :end_date, :last_fetched)""",
         market,
     )
     conn.commit()

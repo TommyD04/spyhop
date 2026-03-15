@@ -323,10 +323,7 @@ The `ORDER BY LENGTH DESC` picks the longest (most specific) matching event slug
 
 Also proposed: a kill switch for < 1 hour to resolution (insufficient time to capture edge).
 
-**What's needed for implementation**: Market end-date data. The Gamma API provides `end_date_iso` on events/markets, but we don't store it yet. Requires:
-1. Schema addition: `end_date` column on `markets` or `events` table
-2. Capture `end_date_iso` during Gamma API fetch
-3. A new detector or score modifier that computes time-to-resolution at signal time
+**Status: Implemented** — Hard 30-day cutoff. `max_days_to_resolution = 30` in `config.toml`. Markets table stores `end_date` from Gamma API `endDateIso`; `PaperTrader.maybe_trade()` rejects trades resolving >30 days out. The graduated SPECULATIVE/EARLY/HOT/IMMINENT score modifiers are deferred to a future refinement pass.
 
 ### Q4: Niche market low-odds outsized bets (undeveloped thesis)
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from datetime import datetime, timezone
 from typing import Any
 
 from spyhop.detector.base import ScoreResult
@@ -24,6 +25,7 @@ class PaperTrader:
             "min_score", config["scorer"]["alert_threshold"]
         )
         self._capital = config["paper"]["starting_capital"]
+        self._max_days = config["paper"].get("max_days_to_resolution", 30)
         self._conn = conn
 
     def maybe_trade(
@@ -43,6 +45,26 @@ class PaperTrader:
                 return PaperTradeResult(executed=False, reason="below min_score")
             if signal_id is None:
                 return PaperTradeResult(executed=False, reason="no signal")
+
+            # Resolution proximity check — skip markets too far out
+            if self._max_days > 0:
+                condition_id = trade.get("condition_id", "")
+                market_row = db.get_market(self._conn, condition_id)
+                if market_row and market_row.get("end_date"):
+                    try:
+                        end_dt = datetime.fromisoformat(market_row["end_date"])
+                        days_out = (end_dt - datetime.now(timezone.utc)).days
+                        if days_out > self._max_days:
+                            log.info(
+                                "Paper trade rejected: resolves in %d days (max %d), %s",
+                                days_out, self._max_days, condition_id[:12],
+                            )
+                            return PaperTradeResult(
+                                executed=False,
+                                reason=f"resolves in {days_out}d (max {self._max_days}d)",
+                            )
+                    except (ValueError, TypeError):
+                        pass  # Unparseable date — allow trade through
 
             # Normalize SELL → BUY opposite outcome
             side = trade.get("side", "BUY")

@@ -310,6 +310,22 @@ Minimum composite score to open a paper position. The gatekeeper for the entire 
 > **Citation:** RQ4 §6.3 — "Min suspicion score to trade: 7/10... Alert threshold from RQ3." SYNTHESIS.md §2.2 playbook — "Skip if < 7." Current 6.0 is a deliberate test deviation.
 > **Confidence:** MOD-HIGH
 
+### `max_days_to_resolution = 30`
+
+Hard cutoff: reject paper trades on markets that resolve more than N days in the future. Insider information is perishable — empirical analysis of documented insider cases shows all occurred within 48 hours of resolution. Markets resolving months out are speculation, not insider signal.
+
+| Value | Behavior |
+|-------|----------|
+| **0** | Disabled (no resolution check) |
+| **14** | Aggressive — only near-term markets. May miss informed trades in the 14–30 day window |
+| **30** (current) | Research-supported cutoff. Balances insider signal capture vs. speculative noise |
+| **60** | Permissive — allows some longer-dated markets through |
+
+Markets without an `end_date` in the cache (CLOB fallback, legacy entries) pass through unchecked (fail-open).
+
+> **Citation:** V4B_FARM_DETECTION.md §11 Q3 — empirical analysis of resolution proximity. All documented insider cases within 48h of resolution. Long-dated wallet population has zero overlap with short-dated insider patterns.
+> **Confidence:** MOD-HIGH
+
 ---
 
 ## Research-Recommended Controls Not Yet Implemented
