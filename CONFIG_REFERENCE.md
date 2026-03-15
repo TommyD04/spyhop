@@ -326,6 +326,21 @@ Markets without an `end_date` in the cache (CLOB fallback, legacy entries) pass 
 > **Citation:** V4B_FARM_DETECTION.md §11 Q3 — empirical analysis of resolution proximity. All documented insider cases within 48h of resolution. Long-dated wallet population has zero overlap with short-dated insider patterns.
 > **Confidence:** MOD-HIGH
 
+### `blocked_categories = ["Crypto"]`
+
+Categories to completely exclude from paper trading. Trades matching a blocked `primary_tag` are rejected before resolution or risk checks.
+
+Currently blocks **Crypto** because empirical analysis of 9+ days of data shows:
+- 91.5% of crypto signals are 5-minute binary "Up or Down" micro-markets (BTC, SOL, ETH)
+- Average entry price $0.99 — near-certainty bets with no information asymmetry
+- 40 of 42 crypto wallets are high-volume operators (trade_count at ceiling), not insiders
+- No plausible insider edge exists for "will BTC go up in the next 5 minutes"
+
+Set to an empty list `[]` to disable category filtering entirely.
+
+> **Citation:** Empirical analysis of spyhop DB (2026-03-06 to 2026-03-15). 120 crypto trades, $2.55M volume, zero paper positions opened.
+> **Confidence:** HIGH
+
 ---
 
 ## Research-Recommended Controls Not Yet Implemented

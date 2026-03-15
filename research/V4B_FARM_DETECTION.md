@@ -337,6 +337,12 @@ Also proposed: a kill switch for < 1 hour to resolution (insufficient time to ca
 
 This is conceptually the inverse of FARM filtering — instead of *excluding* noise, it's about *boosting* a specific signal shape. May warrant its own detector or a score modifier layer.
 
+### Q5: Crypto category exclusion
+
+**Problem**: Crypto trades generate high composite scores but carry zero insider signal. 91.5% of crypto signals are 5-minute binary "Up or Down" micro-markets (BTC, SOL, ETH direction bets). Average entry price $0.99 — near-certainty bets where no information asymmetry exists. 40 of 42 crypto wallets are high-volume operators (trade_count at ceiling), consistent with market-making or arbitrage, not insider behavior.
+
+**Status: Implemented** — `blocked_categories = ["Crypto"]` in `config.toml`. PaperTrader rejects trades whose `primary_tag` matches a blocked category. Configurable: set to `[]` to disable.
+
 ---
 
 ## Appendix: Key Queries

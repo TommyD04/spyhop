@@ -26,6 +26,9 @@ class PaperTrader:
         )
         self._capital = config["paper"]["starting_capital"]
         self._max_days = config["paper"].get("max_days_to_resolution", 30)
+        self._blocked_categories: set[str] = set(
+            config["paper"].get("blocked_categories", [])
+        )
         self._conn = conn
 
     def maybe_trade(
@@ -45,6 +48,17 @@ class PaperTrader:
                 return PaperTradeResult(executed=False, reason="below min_score")
             if signal_id is None:
                 return PaperTradeResult(executed=False, reason="no signal")
+
+            # Category blocklist — skip categories with no insider signal
+            category = trade.get("primary_tag", "")
+            if category and self._blocked_categories and category in self._blocked_categories:
+                log.info(
+                    "Paper trade rejected: blocked category %s, %s",
+                    category, trade.get("condition_id", "")[:12],
+                )
+                return PaperTradeResult(
+                    executed=False, reason=f"blocked category: {category}",
+                )
 
             # Resolution proximity check — skip markets too far out
             if self._max_days > 0:

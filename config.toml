@@ -52,3 +52,4 @@ max_exposure_pct = 0.50          # Max 50% of capital deployed at once
 max_concurrent = 20              # Max simultaneous open positions
 min_score = 6.0                  # Minimum composite score to trigger entry
 max_days_to_resolution = 30      # Skip markets resolving more than N days out
+blocked_categories = ["Crypto"]  # Categories to exclude from paper trading
