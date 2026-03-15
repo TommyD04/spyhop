@@ -250,25 +250,39 @@ The closer a market is to resolution, the more suspicious a high-scoring trade b
 - [x] Cat column in dashboard (Politics, Sports, Crypto, Economy)
 - [x] Outcome display in market column (e.g. "O/U 6.5 → Under")
 
-### V4b — FARM Detection (CURRENT PRIORITY — week of 2026-03-14)
+### V4b — Market-Maker (MM) Filter (CURRENT PRIORITY — week of 2026-03-14)
 
 **Must complete before advancing to V5 or any other Phase 2 work.**
 
-Both-side trading (market-making / reward farming) contaminates the signal pipeline. Empirical analysis of 9 days of data identified 39 hedge pairs across 20 wallets, overwhelmingly on live sports markets. Two wallets alone account for ~60% of hedged volume ($4.2M combined) and are professional-scale operators (400–800+ trades, 175–442 unique markets) masked by the shallow profile ceiling.
+Both-side trading — whether professional market-making, reward farming, or in-play hedging — contaminates the signal pipeline. None of these behaviors express directional conviction, which is the foundation of the insider/informed thesis. Empirical analysis of 9 days of data identified 39 hedge pairs across 20 wallets, overwhelmingly on live sports markets. Two wallets alone account for ~60% of hedged volume ($4.2M combined) and are professional-scale operators (400–800+ trades, 175–442 unique markets).
 
 See `research/V4B_FARM_DETECTION.md` for full analysis, behavioral clusters, and proposed heuristics.
 
-**Implementation plan (two-layer defense):**
-- [ ] Layer 1: Real-time lookback — before paper trade entry, check if wallet has traded the opposite outcome on the same condition_id within the last 30 minutes. Reject if yes.
-- [ ] Layer 2: Wallet reputation — flag wallets caught by Layer 1 on 2+ distinct markets. Suppress all future paper trades from flagged wallets.
-- [ ] Re-validate thresholds after 3 weeks of data collection
-
-**Adjacent open questions (also tracked in V4B_FARM_DETECTION.md §11):**
+**Completed work (signal quality improvements):**
 - [x] Q1: Bumped shallow wallet profile limit from 6 to 25 (single API call, enables MM vs. newcomer distinction). Invalidated 1,619 stale cache entries.
 - [x] Q2: Fix event category slug mismatch — two-step lookup (exact then prefix) in EventCache.get_event() and db.get_event_by_prefix(). Coverage: 29% → 69%.
 - [x] Q3: Resolution proximity filter — hard 30-day cutoff (`max_days_to_resolution` in config.toml). Markets table stores `end_date` from Gamma API `endDateIso`. PaperTrader rejects trades on markets resolving >30 days out.
-- [x] Q5: Category blocklist — `blocked_categories = ["Crypto"]` in config.toml. Crypto is 91% 5-minute binary micro-markets (BTC/SOL/ETH Up or Down) at $0.99 avg price — no insider edge, pure noise. Paper trader rejects trades matching blocked `primary_tag`.
-- [ ] Q4: Niche market low-odds outsized bets — undeveloped thesis on tailing high-conviction low-probability signals. Needs further thought.
+- [x] Q5: Category blocklist — `blocked_categories = ["Crypto"]` in config.toml. Crypto is 91% 5-minute binary micro-markets (BTC/SOL/ETH Up or Down) at $0.99 avg price — no insider edge, pure noise.
+
+**Proposed MM filter (three-layer defense) — NOT YET APPROVED FOR IMPLEMENTATION:**
+
+The following plan unifies the original two-layer FARM defense with the anti-hedge filter (previously Phase 2). All three address the same root problem: both-side activity at different levels.
+
+- [ ] **Layer 0 — Portfolio anti-hedge**: Prevent the paper trader from holding both sides of the same market. Currently `risk.py` only blocks duplicate `condition_id + outcome`; a second whale on the *opposite* outcome passes through, guaranteeing a spread loss. Proposed fix: reject if any open position shares the same `condition_id`, regardless of outcome.
+- [ ] **Layer 1 — Real-time lookback**: Before paper trade entry, check if the incoming wallet has traded the opposite outcome on the same `condition_id` within a configurable window (e.g., 30 min). If yes, this wallet is MM-ing, not expressing conviction. Reject.
+- [ ] **Layer 2 — Wallet reputation**: When Layer 1 catches a wallet on 2+ distinct markets, flag the wallet as a serial MM operator. Suppress all future paper trades from flagged wallets.
+- [ ] Re-validate thresholds after 3 weeks of data collection.
+
+**Open reservations (must resolve before implementing):**
+
+1. **Layer 0 is arbitrary.** Blocking the second side while keeping the first open is a coin flip — the first entry might be the wrong side. This could randomly increase risk rather than reduce it. Need to think through: should we close the *first* position instead? Should we block both and take neither? Does the score of the second trade matter (higher score = stronger conviction = maybe the first was wrong)?
+
+2. **Execution timing is underspecified.** Layers 1 and 2 imply the paper trader has time to "look back" before executing, but the current flow is synchronous: trade arrives → score → maybe_trade → done. There's no explicit delay, but the lookback query adds a dependency on *previous* trades being already persisted. Need to map the exact data flow: when does the incoming trade get inserted vs. when does the lookback query run? Could we miss a hedge pair if both sides arrive in the same batch? The logic and sequencing need to be clearly articulated before writing code.
+
+3. **Serial MM detection needs more exploration.** The 2-market threshold for Layer 2 is proposed but not validated. Questions: How many wallets in the current DB would be flagged? What's the false positive rate (legitimate traders who hedged twice)? Do flagged wallets ever produce genuine insider signals? Should the flag decay over time? Should we run a retrospective analysis against existing data before building the persistence layer?
+
+**Deferred (separate workstream):**
+- [ ] Q4: Niche market low-odds outsized bets — undeveloped thesis on tailing high-conviction low-probability signals. Would be a different thesis engine, not this filter.
 
 **Data limitation**: Current analysis covers 2026-03-06 to 2026-03-15 (9 days). Continue collecting data during implementation to validate pattern persistence.
 
@@ -279,8 +293,8 @@ See `research/V4B_FARM_DETECTION.md` for full analysis, behavioral clusters, and
 - [ ] Funding chain tracing (Polygon RPC: where did wallet funds come from?)
 - [ ] Historical win-rate analysis via Goldsky subgraphs
 - [ ] Wallet tagging / watchlist system
-- [ ] Reward farmer detection: tag matched buy-sell pairs (same wallet, same market, <N min apart) as `FARM` to filter noise from genuine directional trades. Observed pattern: rotating wallets doing single round-trips on high-reward near-certainty markets (e.g., Fed rate at 99.8¢), losing ~0.1¢/token to harvest `clobRewards` liquidity incentives.
-- [ ] **Anti-hedge filter**: risk engine currently only blocks duplicate (same condition_id + same outcome). It allows taking BOTH sides of the same market (e.g., Celtics AND Wizards on the same spread), which is a guaranteed loss to the spread. Fix: reject entry if any open position shares the same condition_id, regardless of outcome. Observed 2026-03-14 smoke test: positions #10/#11 (Celtics spread both sides), #12/#13 (Hurricanes both sides), #5/#6 (AD Cali both sides)
+- [x] Reward farmer / MM detection: subsumed into V4b MM filter (see V4b section). Reward farming is one behavior within the broader both-side trading pattern that the MM filter addresses.
+- [x] **Anti-hedge filter**: pulled into V4b as Layer 0 of the MM filter (see V4b section). Not yet implemented — open reservations on approach.
 - [x] **Resolution proximity filter**: hard 30-day cutoff implemented in V4b Q3. `max_days_to_resolution = 30` in config.toml. Score dampening (SPECULATIVE/EARLY/HOT/IMMINENT bands) deferred to future refinement.
 - [ ] Per-category exposure limits (max 20% of bankroll per category — prevents correlated bets, e.g., all UFC fights resolving same night). Source: RQ4 §6.2, SYNTHESIS.md §1.1
 - [ ] Daily/weekly loss circuit breakers (10%/20% of bankroll) and consecutive-loss pause (3 losses). Requires V5 resolution data

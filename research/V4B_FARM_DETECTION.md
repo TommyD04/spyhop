@@ -1,8 +1,8 @@
-# V4b — FARM Detection: Empirical Analysis of Both-Side Trading in Spyhop Data
+# V4b — Market-Maker (MM) Filter: Empirical Analysis of Both-Side Trading in Spyhop Data
 
 ## Status
 
-**Phase**: Research complete, implementation pending
+**Phase**: Research complete. Signal quality improvements (Q1–Q3, Q5) implemented. Core MM filter (Layers 0–2) proposed but **not yet approved** — open reservations on approach require further exploration before implementation.
 **Data window**: 2026-03-06 to 2026-03-15 (9 days, ~10K trades)
 **Limitation**: Single-week sample. Patterns should be validated over 2–3 additional weeks before calibrating final thresholds.
 
@@ -10,9 +10,9 @@
 
 ## 1. Problem Statement
 
-Spyhop's composite scorer (fresh wallet × size anomaly × niche market) identifies large, unusual trades as potential insider signals. The paper trader then follows these signals. However, some high-scoring trades come from wallets that are **trading both sides of the same market** — effectively hedging or market-making, not expressing directional conviction. Following one leg of a hedged pair earns zero edge minus spread, wasting position slots and capital.
+Spyhop's composite scorer (fresh wallet × size anomaly × niche market) identifies large, unusual trades as potential insider signals. The paper trader then follows these signals. However, some high-scoring trades come from wallets that are **trading both sides of the same market** — whether through professional market-making, reward farming, or in-play hedging. None of these behaviors express directional conviction. Following one leg of a hedged pair earns zero edge minus spread, wasting position slots and capital.
 
-This analysis examines the empirical prevalence, structure, and behavioral signatures of both-side trading in the live Spyhop dataset to design a detection and exclusion mechanism ("FARM filter") for the paper trading pipeline.
+This analysis examines the empirical prevalence, structure, and behavioral signatures of both-side trading in the live Spyhop dataset to design a detection and exclusion mechanism ("MM filter") for the paper trading pipeline. The term "MM" is used inclusively to cover all both-side behaviors — thoughtful market-making, reward farming, and dynamic hedging are different motivations but produce the same signal contamination.
 
 ---
 
