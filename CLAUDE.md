@@ -264,26 +264,26 @@ See `research/V4B_FARM_DETECTION.md` for full analysis: §1–§10 cover origina
 - [x] Q3: Resolution proximity filter — hard 30-day cutoff (`max_days_to_resolution` in config.toml). Markets table stores `end_date` from Gamma API `endDateIso`. PaperTrader rejects trades on markets resolving >30 days out.
 - [x] Q5: Category blocklist — `blocked_categories = ["Crypto"]` in config.toml. Crypto is 91% 5-minute binary micro-markets (BTC/SOL/ETH Up or Down) at $0.99 avg price — no insider edge, pure noise.
 
-**Proposed MM filter (three-layer defense) — ON HOLD, PARTIALLY INVALIDATED:**
+**MM filter — three-check approach (replaces earlier three-layer proposal):**
 
-The original three-layer proposal assumed both-side activity = non-directional noise. The §12 findings weakened this assumption:
+Analysis of 29K trades (2026-03-06 to 2026-03-21) revealed that the composite scoring system already filters most systematic MMs naturally (deep trade histories → low fresh wallet scores). However, **5 of 9 paper positions (55.6%) were CLOB settlement noise** — both counterparties of a matched fill cleared the $10K threshold and scored high. Three targeted checks close the remaining gaps:
 
-- [ ] **Layer 0 — Portfolio anti-hedge**: Prevent the paper trader from holding both sides of the same market. **Still conceptually valid** but the approach (block second entry) is arbitrary — the second signal may be stronger/more informed than the first. Open question: should the system close the first position instead, or reject both?
-- [ ] **Layer 1 — Real-time lookback**: Check if incoming wallet traded opposite outcome on same condition_id recently. **Would produce false positives** — the §12 hub wallet's in-play adjustments (switching sides after game events) would be incorrectly flagged. The filter cannot distinguish "noise hedge" from "informed in-play adjustment."
-- [ ] **Layer 2 — Wallet reputation**: Flag wallets caught on 2+ markets. **Would flag the most interesting wallet in the dataset** — the hub wallet trades both sides on 16+ markets but is heavily directional (73-100% one-sided) on each. Suppressing it would remove potentially valuable signal.
+- [ ] **Check 1 — Matched-pair detection** (5s delay + 10s window): Before executing a paper trade, wait 5 seconds for settlement counterparts to arrive in the DB, then check for any directionally opposite trade on the same condition_id within 10 seconds. Catches CLOB settlement pairs. Would have blocked 5/9 current positions.
+- [ ] **Check 2 — Same-wallet lookback** (2h window): Check if the same wallet traded the opposite effective outcome on the same condition_id within the last 2 hours. Catches burst MMs and position reversals. Would have blocked 1/9 additional (overlaps with Check 1).
+- [ ] **Check 3 — Portfolio anti-hedge** (safety rail): Before opening a position, check if the paper trader already holds ANY position on the same condition_id. Prevents the portfolio from holding both sides of a market.
 
-**Key insight from §12**: The right question is not "how do we filter out both-side wallets" but "how do we distinguish reward farming (balanced, near-certainty, <2 min) from informed in-play adjustment (directional, uncertain prices, 5-90 min)?" These are structurally different behaviors.
+Config: `[detector.mm_filter]` section with `enabled`, `settle_delay_seconds`, `pair_max_gap_seconds`, `wallet_lookback_minutes`.
 
-**Revised open questions:**
-1. Can we distinguish reward farming (net exposure ~0%, near-certainty prices) from in-play adjustment (net exposure >70%, toss-up prices) using structural heuristics?
-2. Is the hub wallet (`0x2a2C`) profitable? Requires V5 resolution data. If profitable, this is a "follow the sharp" signal, not noise to filter.
-3. Can we detect in-play position changes in real-time and ride along? ("Tail the sharp in-play bettor" — a different thesis than insider detection.)
-4. What fraction of both-side activity is genuine reward farming (balanced round-trips) vs CLOB settlement artifacts vs in-play adjustment?
+**Key concept: `effective_outcome`** — In a binary market, `BUY outcome_index=0` and `SELL outcome_index=1` are the same directional bet. The effective outcome normalizes this: `effective = outcome_index if side == 'BUY' else 1 - outcome_index`. Two trades are opposite if their effective outcomes differ.
+
+> **Historical note**: The earlier three-layer proposal (Layer 0 portfolio anti-hedge, Layer 1 real-time lookback, Layer 2 wallet reputation) was put ON HOLD after the §12 investigation raised concerns about flagging in-play bettors. Analysis of 29K trades showed these concerns were valid but the problem was different than expected: the scoring system already handles in-play bettors (deep histories → low scores), while the real gap was CLOB settlement pairs that the old proposal didn't address. The three-check approach above supersedes the three-layer proposal. See `research/V4B_FARM_DETECTION.md` §13 for the analysis.
+
+**Remaining open questions:**
+1. Is the hub wallet (`0x2a2C`) profitable? Requires V5 resolution data. If profitable, this is a "follow the sharp" signal.
+2. Can we detect in-play position changes in real-time and ride along? Requires V5 to assess profitability first.
 
 **Deferred (separate workstream):**
-- [ ] Q4: Niche market low-odds outsized bets — undeveloped thesis on tailing high-conviction low-probability signals. Would be a different thesis engine, not this filter.
-
-**Data limitation**: Current analysis covers 2026-03-06 to 2026-03-15 (9 days). Continue collecting data. V5 resolution data is prerequisite for answering profitability questions.
+- [ ] Q4: Niche market low-odds outsized bets — undeveloped thesis. Would be a different thesis engine, not this filter.
 
 ### Phase 2 — Enhanced Detection (next — after V4b)
 - [x] V4: Paper trading (risk engine + PaperExecutor)
@@ -292,8 +292,8 @@ The original three-layer proposal assumed both-side activity = non-directional n
 - [ ] Funding chain tracing (Polygon RPC: where did wallet funds come from?)
 - [ ] Historical win-rate analysis via Goldsky subgraphs
 - [ ] Wallet tagging / watchlist system
-- [x] Reward farmer / MM detection: subsumed into V4b MM filter (see V4b section). Reward farming is one behavior within the broader both-side trading pattern that the MM filter addresses.
-- [x] **Anti-hedge filter**: pulled into V4b as Layer 0 of the MM filter (see V4b section). Not yet implemented — open reservations on approach.
+- [x] Reward farmer / MM detection: implemented in V4b as three-check MM filter (matched-pair detection, wallet lookback, portfolio anti-hedge). See V4b section.
+- [x] **Anti-hedge filter**: implemented in V4b as Check 3 (portfolio anti-hedge in risk.py). Blocks any paper position on a condition_id where a position already exists.
 - [x] **Resolution proximity filter**: hard 30-day cutoff implemented in V4b Q3. `max_days_to_resolution = 30` in config.toml. Score dampening (SPECULATIVE/EARLY/HOT/IMMINENT bands) deferred to future refinement.
 - [ ] Per-category exposure limits (max 20% of bankroll per category — prevents correlated bets, e.g., all UFC fights resolving same night). Source: RQ4 §6.2, SYNTHESIS.md §1.1
 - [ ] Daily/weekly loss circuit breakers (10%/20% of bankroll) and consecutive-loss pause (3 losses). Requires V5 resolution data

@@ -2,6 +2,12 @@
 
 Every parameter in `config.toml`, how it works, practical tuning guidance, and research citations.
 
+## Config Loading & Defaults
+
+`config.py` defines built-in `DEFAULTS` that are deep-merged with whatever `config.toml` is found. The search order is: `./config.toml` → project root → user config dir → defaults only.
+
+**Keep DEFAULTS aligned with config.toml.** The DEFAULTS in `config.py` only matter when no `config.toml` is found, but keeping them aligned avoids a subtle gotcha: if someone runs spyhop from a directory without `config.toml` and the project-root fallback fails, they'd silently get stale default values. The `_deep_merge(DEFAULTS, toml)` pattern means explicit config always wins, but mismatched defaults create a confusing "works on my machine" scenario where behavior differs depending on whether the config file was found.
+
 ## How the Controls Layer
 
 The risk controls form a layered funnel. Each layer catches what the previous one doesn't:
@@ -10,6 +16,8 @@ The risk controls form a layered funnel. Each layer catches what the previous on
 usd_threshold  (noise floor — drop small trades)
      ↓
   min_score    (conviction gate — only trade high-confidence signals)
+     ↓
+ mm_filter     (settlement pair + same-wallet lookback + portfolio anti-hedge)
      ↓
 max_concurrent (slot limit — cap simultaneous positions)
      ↓
@@ -193,6 +201,56 @@ Note: Niche tops out at 2.5x vs size anomaly's 3.0x — niche alone is a slightl
 
 > **Citation:** SYNTHESIS.md §1.1 — aligned with RQ2 §4 finding that markets controlled by small groups have highest insider risk.
 > **Confidence:** MOD
+
+---
+
+## [detector.mm_filter]
+
+Controls the Market-Maker filter that screens out CLOB settlement pairs, same-wallet reversals, and portfolio self-hedging from the paper trading pipeline. See `research/V4B_FARM_DETECTION.md` §13 for the full analysis.
+
+### `enabled = true`
+
+Master toggle for the MM filter. When `false`, all three checks (matched pair, wallet lookback, portfolio anti-hedge) are bypassed except the portfolio anti-hedge in `risk.py` which is always active. Default: `false` (in code DEFAULTS), `true` (in config.toml).
+
+### `settle_delay_seconds = 7`
+
+Seconds to wait after persisting a trade before evaluating it for paper trading. This delay allows CLOB settlement counterparts (opposite-side trades in the same `tx_hash`) to arrive and be inserted into the DB. Analysis showed 100% of settlement pairs arrive within 5 seconds (66.8% within the same second). The 7-second value adds a 2-second safety margin.
+
+| Value | Coverage | Trade-off |
+|:-----:|:--------:|:----------|
+| 0 | 0% | No delay, settlement pairs invisible |
+| 3 | ~94% | Misses some slow arrivals |
+| 5 | 100% | Catches all observed pairs |
+| **7** | **100%** | **Recommended — adds safety margin beyond observed max** |
+| 10 | 100% | Unnecessary extra delay |
+
+> **Citation:** V4B_FARM_DETECTION.md §13.2 — settlement pair timing analysis.
+> **Confidence:** HIGH — based on 8,239 same-`tx_hash` pairs.
+
+### `pair_max_gap_seconds = 14`
+
+Maximum time gap (in seconds) between the triggering trade and a directionally opposite trade on the same `condition_id` to classify as a matched settlement pair. Checked after the settle delay, against all wallets (not just the triggering wallet). Set to 2x the settle delay — the `ABS()` query looks in both temporal directions, so this provides full coverage of the delay window.
+
+| Value | Effect |
+|:-----:|:-------|
+| 5 | Tight — only catches true settlement pairs |
+| 10 | Moderate safety margin |
+| **14** | **Recommended — 2x settle delay, covers both temporal directions** |
+| 30 | Overly broad — would catch legitimate rapid position-taking |
+
+### `wallet_lookback_minutes = 120`
+
+Time window (in minutes) to check whether the same wallet has traded the opposite effective outcome on the same `condition_id`. Catches burst MMs that buy and sell within a session, and position reversals (wallets that enter and exit within hours).
+
+| Value | Signals flagged | False positive risk |
+|:-----:|:-:|:-------|
+| 30 | ~60% | Very low |
+| 60 | ~76% | Very low |
+| **120** | **77%** | **None observed — clean break at 6h** |
+| 360 | 95% | Low — 4 additional signals from FIFA/LoL |
+
+> **Citation:** V4B_FARM_DETECTION.md §13.2 — window size analysis. Natural plateau at 6h; no signals in the 6h–150h gap.
+> **Confidence:** HIGH — tested against 204 scored signals.
 
 ---
 

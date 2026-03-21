@@ -2,9 +2,9 @@
 
 ## Status
 
-**Phase**: Research ongoing. Signal quality improvements (Q1–Q3, Q5) implemented. Core MM filter (Layers 0–2) proposed but **not yet approved** — §12 investigation of multi-wallet transaction mechanics significantly revised the understanding of both-side trading and invalidated key assumptions behind the original filter design.
-**Data window**: 2026-03-06 to 2026-03-15 (9 days, ~11K trades)
-**Limitation**: Single-week sample. Patterns should be validated over 2–3 additional weeks before calibrating final thresholds.
+**Phase**: Implementation in progress. Signal quality improvements (Q1–Q3, Q5) complete. Three-check MM filter designed and approved (§13). Original two-layer proposal (§9) and three-layer CLAUDE.md proposal are **superseded** by §13.
+**Data window**: §1–§10: 2026-03-06 to 2026-03-15 (9 days, ~11K trades). §13: 2026-03-06 to 2026-03-21 (15 days, ~29K trades).
+**Limitation**: V5 resolution data still required to assess hub wallet profitability and overall paper trade P&L.
 
 ---
 
@@ -221,7 +221,9 @@ These are effectively spreading across the probability space of a single event. 
 
 ---
 
-## 9. Proposed Two-Layer Defense
+## 9. Proposed Two-Layer Defense *(SUPERSEDED by §13)*
+
+> **Note**: This proposal was superseded by the three-check approach in §13 (2026-03-21). Analysis of 29K trades showed the primary contamination source was CLOB settlement pairs, not same-wallet hedging. The two-layer approach below is preserved as historical context.
 
 ### Layer 1 — Real-Time Lookback (catches hedge leg)
 
@@ -249,7 +251,9 @@ This is the "fool me twice" defense. After observing a wallet hedge on 2+ market
 
 ---
 
-## 10. Data Limitations & Next Steps
+## 10. Data Limitations & Next Steps *(SUPERSEDED by §13)*
+
+> **Note**: The recommended plan in this section was superseded by §13. The data limitations remain relevant.
 
 ### What we know
 
@@ -457,6 +461,70 @@ The original question was "how do we filter out MM noise?" The investigation sug
 - **The $POLY incentive structure** still motivates volume inflation.
 - **The signal quality improvements (Q1-Q5)** are all valid and should remain.
 - **The $10K threshold is appropriate** — sub-threshold trades are not hiding meaningful hedging activity.
+
+---
+
+## 13. Revised Approach: Three-Check MM Filter (2026-03-21)
+
+> **This section supersedes the two-layer defense proposed in §9 and the §10 recommended plan.** The three-layer defense discussed in CLAUDE.md (Layers 0-2) is also superseded. §1–§8 and §11–§12 remain valid research.
+
+### 13.1 Why the Original Approach Was Superseded
+
+The §9 two-layer proposal and the subsequent three-layer CLAUDE.md proposal were designed around the assumption that both-side wallet activity was the primary source of paper trading contamination. Analysis of the expanded dataset (29K trades, up from 10K in §1–§10) revealed:
+
+1. **The scoring system already filters most MMs.** Of 120 systematic both-side wallets (3+ markets), almost none score >=7. The fresh wallet detector is the primary gate — real MMs have deep trade histories.
+
+2. **The real problem is CLOB settlement pairs, not MM wallets.** 5 of 9 paper positions (55.6%) were contaminated by settlement counterparties — two wallets on opposite sides of the same fill, both appearing fresh, both scoring 9-10. This pattern was not addressed by the original §9 proposal.
+
+3. **Layer 2 (wallet reputation) was overengineered.** Only 3 of 120 systematic both-side wallets scored high enough to matter. Building a reputation system for 3 wallets was unnecessary complexity.
+
+4. **The §12 concerns about in-play bettors were valid but irrelevant to paper trading.** The hub wallet (`0x2a2C`) and similar in-play operators score below 7.0 because they have deep histories. No MM filter design would affect them regardless.
+
+### 13.2 Key Data Findings (29K trades, 2026-03-06 to 2026-03-21)
+
+| Metric | Original (§1-§10, 10K trades) | Updated (29K trades) |
+|--------|-------------------------------|---------------------|
+| Both-side wallet-market pairs | 39 | 2,258 |
+| High-score signals from both-side wallets | 13/520 (2.5%) | 16/204 (7.8%) |
+| Paper positions contaminated | 0/0 (no positions yet) | 5/9 (55.6%) — all settlement pairs |
+| Near-pairs (<10 min) scoring >=7 | Not measured | 0 |
+| Systematic operators (3+ markets) scoring >=7 | Not measured | 3/120 |
+
+**Window size analysis for same-wallet lookback:**
+
+| Window | Signals flagged | % of 204 | Marginal gain |
+|--------|:-:|:-:|:-:|
+| 1h | 16 | 7.8% | — |
+| 2h | 17 | 8.3% | +1 |
+| 4h | 19 | 9.3% | +2 |
+| 6h | 21 | 10.3% | +2 |
+| 12h+ | 21 | 10.3% | 0 (plateau) |
+
+Natural break at 6h — no signals between 6h and 150h. A 2h window catches 77% of all flaggable signals with zero false positives in the gray zone.
+
+**Settlement pair timing (same-`tx_hash` opposite-side pairs):**
+
+| Gap | % of pairs |
+|-----|:-:|
+| 0s (same second) | 66.8% |
+| 0-1s | 27.3% |
+| 1-2s | 5.5% |
+| 2-5s | 0.4% |
+| >5s | 0.0% |
+
+A 5-second `asyncio.sleep` before paper trade evaluation catches 100% of settlement pairs.
+
+### 13.3 Three-Check Design
+
+| Check | What it catches | Where | Config |
+|-------|----------------|-------|--------|
+| **Matched pair** | CLOB settlement counterparties (any wallet) | `cli.py` (5s delay) + `trader.py` (gate) | `pair_max_gap_seconds = 10` |
+| **Wallet lookback** | Same-wallet reversals, burst MMs | `trader.py` (gate) | `wallet_lookback_minutes = 120` |
+| **Portfolio anti-hedge** | Paper portfolio holding both sides | `risk.py` (gate) | Always on |
+
+**`effective_outcome`**: Normalizes BUY/SELL + outcome_index into a single directional indicator. `effective = outcome_index if side == 'BUY' else 1 - outcome_index`. Two trades are opposite if their effective outcomes differ.
+
+**Gate order in `maybe_trade()`**: score → signal → category → wallet lookback → matched pair → resolution → SELL normalization → risk.evaluate (anti-hedge → duplicate → concurrent → sizing → exposure)
 
 ---
 

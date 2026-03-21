@@ -30,6 +30,12 @@ multiplier_low = 1.5            # 2-5% of 24h volume
 multiplier_mid = 2.0            # 5-10% of 24h volume
 multiplier_high = 3.0           # 10%+ of 24h volume
 
+[detector.mm_filter]
+enabled = true                   # Toggle MM filter on/off
+settle_delay_seconds = 7         # Wait for settlement pair to arrive in DB
+pair_max_gap_seconds = 14        # Max gap to detect matched settlement pairs (2x delay)
+wallet_lookback_minutes = 120    # Same-wallet opposite-side lookback window
+
 [detector.niche_market]
 max_daily_volume_usd = 50_000   # Markets below this are "niche"
 multiplier_low = 1.5            # $25K-$50K daily

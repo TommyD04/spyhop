@@ -39,7 +39,11 @@ class RiskEngine:
         4. Exposure limit: total deployed capital cap
         5. Available capital: enough undeployed capital
         """
-        # 1. Duplicate check
+        # 0. Anti-hedge: block if we hold ANY position on this market
+        if db.has_position_on_market(self._conn, condition_id):
+            return RiskDecision(False, 0.0, "anti-hedge: already positioned on this market")
+
+        # 1. Duplicate check (subset of anti-hedge, kept as safety net)
         if db.has_position_on(self._conn, condition_id, outcome):
             return RiskDecision(False, 0.0, "duplicate: already positioned on this outcome")
 

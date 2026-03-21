@@ -290,8 +290,11 @@ async def watch(config: dict[str, Any], conn: sqlite3.Connection) -> None:
                     sig[f"{col}_detail"] = r.detail
                 signal_id = db.insert_signal(conn, sig)
 
-            # Paper trading
+            # Paper trading (with optional settle delay for MM filter)
             if paper_trader:
+                settle_delay = paper_trader.settle_delay
+                if settle_delay > 0 and score_result.composite >= paper_trader.min_score:
+                    await asyncio.sleep(settle_delay)
                 paper_result = paper_trader.maybe_trade(
                     trade, score_result, trade_id, signal_id
                 )

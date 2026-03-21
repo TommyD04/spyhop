@@ -72,6 +72,7 @@ CREATE INDEX IF NOT EXISTS idx_trades_condition ON trades(condition_id);
 CREATE INDEX IF NOT EXISTS idx_wallets_trade_count ON wallets(trade_count);
 CREATE INDEX IF NOT EXISTS idx_signals_score ON signals(composite_score DESC);
 CREATE INDEX IF NOT EXISTS idx_signals_trade ON signals(trade_id);
+CREATE INDEX IF NOT EXISTS idx_trades_wallet_condition ON trades(wallet, condition_id);
 
 CREATE TABLE IF NOT EXISTS paper_positions (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,7 +101,7 @@ CREATE INDEX IF NOT EXISTS idx_paper_condition ON paper_positions(condition_id);
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Add columns to existing tables that predate V3."""
+    """Add columns and indices to existing tables."""
     for table, col, typ in [
         ("trades", "outcome", "TEXT"),
         ("trades", "outcome_index", "INTEGER"),
@@ -110,6 +111,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
             pass  # Column already exists
+
+    # V4b: index for MM filter wallet lookback queries
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trades_wallet_condition "
+            "ON trades(wallet, condition_id)"
+        )
+    except sqlite3.OperationalError:
+        pass
 
 
 def init_db(path: Path) -> sqlite3.Connection:
@@ -302,6 +312,74 @@ def has_position_on(conn: sqlite3.Connection, condition_id: str, outcome: str) -
            WHERE condition_id = ? AND outcome = ? AND status = 'OPEN'
            LIMIT 1""",
         (condition_id, outcome),
+    ).fetchone()
+    return row is not None
+
+
+def has_position_on_market(conn: sqlite3.Connection, condition_id: str) -> bool:
+    """Check if there's any open position on this condition_id (any outcome).
+
+    Used by the anti-hedge check to prevent holding both sides of a market.
+    """
+    row = conn.execute(
+        """SELECT 1 FROM paper_positions
+           WHERE condition_id = ? AND status = 'OPEN'
+           LIMIT 1""",
+        (condition_id,),
+    ).fetchone()
+    return row is not None
+
+
+# ── MM filter helpers ──────────────────────────────────────────
+
+
+def has_wallet_opposite_trade(
+    conn: sqlite3.Connection,
+    wallet: str,
+    condition_id: str,
+    effective_outcome: int,
+    trade_timestamp: str,
+    lookback_minutes: int = 120,
+) -> bool:
+    """Check if the same wallet traded the opposite effective outcome
+    on the same condition_id within lookback_minutes of trade_timestamp.
+
+    effective_outcome: 0 or 1, computed as outcome_index if BUY else 1-outcome_index.
+    """
+    row = conn.execute(
+        """SELECT 1 FROM trades
+           WHERE wallet = ?
+             AND condition_id = ?
+             AND (CASE WHEN side = 'SELL' THEN 1 - outcome_index
+                       ELSE outcome_index END) != ?
+             AND ABS(julianday(timestamp) - julianday(?)) * 24 * 60 <= ?
+           LIMIT 1""",
+        (wallet, condition_id, effective_outcome, trade_timestamp, lookback_minutes),
+    ).fetchone()
+    return row is not None
+
+
+def has_matched_pair(
+    conn: sqlite3.Connection,
+    condition_id: str,
+    effective_outcome: int,
+    trade_timestamp: str,
+    max_gap_seconds: int = 10,
+) -> bool:
+    """Check if a directionally opposite trade on the same condition_id
+    arrived within max_gap_seconds of trade_timestamp (any wallet).
+
+    Detects CLOB settlement counterparties where both sides of a fill
+    clear the display threshold.
+    """
+    row = conn.execute(
+        """SELECT 1 FROM trades
+           WHERE condition_id = ?
+             AND (CASE WHEN side = 'SELL' THEN 1 - outcome_index
+                       ELSE outcome_index END) != ?
+             AND ABS(julianday(timestamp) - julianday(?)) * 86400 <= ?
+           LIMIT 1""",
+        (condition_id, effective_outcome, trade_timestamp, max_gap_seconds),
     ).fetchone()
     return row is not None
 

@@ -50,6 +50,12 @@ DEFAULTS: dict[str, Any] = {
             "multiplier_mid": 2.0,
             "multiplier_high": 2.5,
         },
+        "mm_filter": {
+            "enabled": False,
+            "settle_delay_seconds": 7,
+            "pair_max_gap_seconds": 14,
+            "wallet_lookback_minutes": 120,
+        },
     },
     "scorer": {
         "alert_threshold": 7,
