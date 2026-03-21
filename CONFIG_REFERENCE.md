@@ -240,11 +240,11 @@ Toggle paper trading on/off. Should default to `false` in production to prevent 
 
 > **Citation:** RQ4 §7.2-7.3 — "Paper trading mode is unvalidated. Spyhop must implement paper trading before any real capital deployment."
 
-### `starting_capital = 100_000`
+### `starting_capital = 10_000_000`
 
-Simulated bankroll. All position sizing is relative to this. Doesn't change strategy — just scales absolute dollar amounts.
+Simulated bankroll. All position sizing is relative to this. Raised from $100K to $10M (2026-03-20) because the $100K exposure cap ($50K at 50%) was hit with only 9 positions, causing a 96% signal rejection rate. At $10M, the $5M exposure cap accommodates hundreds of positions at $5-7K each, allowing a much larger sample of signals to be tracked while V5 (resolution poller) is pending.
 
-> **Citation:** ADDENDUM_KELLY_CRITERION.md §5.4 uses $50K in worked examples. $100K chosen for simulation convenience.
+> **Citation:** ADDENDUM_KELLY_CRITERION.md §5.4 uses $50K in worked examples. Current $10M is a deliberate observation-mode setting — the goal is to capture signal breadth, not simulate realistic capital deployment.
 > **Confidence:** MOD-LOW (arbitrary for paper)
 
 ### `base_position_usd = 5_000`
@@ -261,7 +261,7 @@ Starting point for position sizing before score scaling. A score-7 trade gets ex
 
 ### `max_position_pct = 0.10`
 
-Hard cap — no single position can exceed 10% of capital ($10K on $100K), regardless of score.
+Hard cap — no single position can exceed 10% of capital ($1M on $10M), regardless of score. At $5K base with score scaling, actual positions are $5-7K — well under this cap. It exists as a safety rail, not a binding constraint at current settings.
 
 | Direction | Effect |
 |-----------|--------|
@@ -273,7 +273,7 @@ Hard cap — no single position can exceed 10% of capital ($10K on $100K), regar
 
 ### `max_exposure_pct = 0.50`
 
-Portfolio-level cap — total deployed capital across all open positions can't exceed 50% of bankroll ($50K). This is the **binding constraint** that actually limits risk, especially with `max_concurrent = 20`.
+Portfolio-level cap — total deployed capital across all open positions can't exceed 50% of bankroll ($5M at $10M capital). With $5-7K positions, this allows ~700-1000 simultaneous positions before binding. The `max_concurrent` setting (200) is the practical constraint instead.
 
 | Direction | Effect |
 |-----------|--------|
@@ -283,18 +283,18 @@ Portfolio-level cap — total deployed capital across all open positions can't e
 > **Citation:** RQ4 §6.2 — portfolio-level controls. The research also recommends a per-category exposure limit of 20% (not yet implemented).
 > **Confidence:** MOD
 
-### `max_concurrent = 20`
+### `max_concurrent = 200`
 
-Maximum simultaneous open positions. Without the resolution poller (V5), this is effectively "total positions ever" since nothing closes.
+Maximum simultaneous open positions. Without the resolution poller (V5), this is effectively "total positions ever" since nothing closes. Raised from 20 to 200 (2026-03-20) alongside the $10M capital increase to allow broader signal observation.
 
-**Interaction with exposure cap:** At 20 slots with a 50% cap ($50K) and ~$3-5K per position, the exposure cap bites around 10-15 positions. The concurrent limit is the outer guardrail; the exposure cap is the inner one.
+**Interaction with exposure cap:** At 200 slots with $5-7K positions, the concurrent limit is now the binding constraint (~$1-1.4M deployed at capacity), well under the $5M exposure cap.
 
 | Direction | Effect |
 |-----------|--------|
-| **Raise** | Exposure cap is the real limit anyway — just allows more small positions to spread across |
-| **Lower** (to 5) | Research-recommended. Forces concentration on highest-conviction trades |
+| **Raise** | More signal breadth — capture more qualifying trades for later analysis |
+| **Lower** (to 5) | Research-recommended for live trading. Forces concentration on highest-conviction trades |
 
-> **Citation:** RQ4 §6.2 — "Max open positions: 5... Concentration limits." Current value of 20 is a deliberate test deviation to observe signal flow without the concurrent limit masking it.
+> **Citation:** RQ4 §6.2 — "Max open positions: 5... Concentration limits." Current value of 200 is a deliberate observation-mode setting to maximize signal capture while V5 is pending.
 > **Confidence:** MOD
 
 ### `min_score = 6.0`
