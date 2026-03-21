@@ -126,6 +126,8 @@ class PaperTrader:
                 if market_row and market_row.get("end_date"):
                     try:
                         end_dt = datetime.fromisoformat(market_row["end_date"])
+                        if end_dt.tzinfo is None:
+                            end_dt = end_dt.replace(tzinfo=timezone.utc)
                         days_out = (end_dt - datetime.now(timezone.utc)).days
                         if days_out > self._max_days:
                             log.info(

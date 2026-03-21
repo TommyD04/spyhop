@@ -124,6 +124,23 @@ Polymarket uses **proxy wallet addresses** for on-chain settlement, NOT users' E
 ### Condition ID Mapping
 Subgraphs and CLOB return `conditionId` values, not human-readable market names. Always cross-reference with Gamma API to resolve to market questions. Cache this mapping aggressively.
 
+### Timezone-Aware Datetime Handling
+All datetime comparisons in Spyhop **must** use timezone-aware objects. External APIs return a mix of formats:
+- **RTDS WebSocket**: ISO 8601 with offset (`2026-03-20T20:24:04+00:00`) — parses as aware
+- **Gamma API `endDateIso`**: Bare date strings (`2026-06-30`) — parses as **naive** (no timezone)
+- **Internal timestamps**: Always use `datetime.now(timezone.utc)`
+
+Python raises `TypeError` when subtracting naive from aware datetimes. If this is caught by a broad `except` handler, the error is silently swallowed and the check becomes a no-op.
+
+**Rule:** After every `datetime.fromisoformat()` call, immediately normalize to UTC:
+```python
+dt = datetime.fromisoformat(raw_string)
+if dt.tzinfo is None:
+    dt = dt.replace(tzinfo=timezone.utc)
+```
+
+**Bug history:** The V4b Q3 resolution proximity check (30-day cutoff) was silently inert from 2026-03-14 to 2026-03-21 because Gamma's naive `end_date` strings hit a `TypeError` in the `except (ValueError, TypeError): pass` handler. Three positions entered at 39, 100, and 284 days out. Fixed by normalizing `end_dt` to UTC before subtraction.
+
 ### Pagination Patterns
 - Gamma API: offset-based (`limit` + `offset`)
 - CLOB API: cursor-based (`next_cursor`, terminal value `"LTE="`)
@@ -261,7 +278,7 @@ See `research/V4B_FARM_DETECTION.md` for full analysis: §1–§10 cover origina
 **Completed work (signal quality improvements):**
 - [x] Q1: Bumped shallow wallet profile limit from 6 to 25 (single API call, enables MM vs. newcomer distinction). Invalidated 1,619 stale cache entries.
 - [x] Q2: Fix event category slug mismatch — two-step lookup (exact then prefix) in EventCache.get_event() and db.get_event_by_prefix(). Coverage: 29% → 69%.
-- [x] Q3: Resolution proximity filter — hard 30-day cutoff (`max_days_to_resolution` in config.toml). Markets table stores `end_date` from Gamma API `endDateIso`. PaperTrader rejects trades on markets resolving >30 days out.
+- [x] Q3: Resolution proximity filter — hard 30-day cutoff (`max_days_to_resolution` in config.toml). Markets table stores `end_date` from Gamma API `endDateIso`. PaperTrader rejects trades on markets resolving >30 days out. **Bug fixed 2026-03-21:** Gamma returns naive date strings (no timezone); the original code raised `TypeError` on naive-vs-aware subtraction, silently caught by broad `except`, making the gate inert. Fixed by normalizing to UTC after parsing. See "Timezone-Aware Datetime Handling" in Critical Implementation Notes.
 - [x] Q5: Category blocklist — `blocked_categories = ["Crypto"]` in config.toml. Crypto is 91% 5-minute binary micro-markets (BTC/SOL/ETH Up or Down) at $0.99 avg price — no insider edge, pure noise.
 
 **MM filter — three-check approach (replaces earlier three-layer proposal):**

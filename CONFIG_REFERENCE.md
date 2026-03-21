@@ -381,6 +381,8 @@ Hard cutoff: reject paper trades on markets that resolve more than N days in the
 
 Markets without an `end_date` in the cache (CLOB fallback, legacy entries) pass through unchecked (fail-open).
 
+> **Bug note (fixed 2026-03-21):** This check was silently inert from 2026-03-14 to 2026-03-21. Gamma API returns naive date strings (`"2026-06-30"`, no timezone), but the code compared against timezone-aware `datetime.now(timezone.utc)`. The resulting `TypeError` was caught by a broad `except (ValueError, TypeError): pass` handler, making every trade pass through. Three positions entered at 39, 100, and 284 days out before the fix. Root cause: always normalize parsed datetimes to UTC before comparison. See CLAUDE.md "Timezone-Aware Datetime Handling."
+
 > **Citation:** V4B_FARM_DETECTION.md §11 Q3 — empirical analysis of resolution proximity. All documented insider cases within 48h of resolution. Long-dated wallet population has zero overlap with short-dated insider patterns.
 > **Confidence:** MOD-HIGH
 

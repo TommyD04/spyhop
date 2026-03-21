@@ -707,6 +707,61 @@ class TestPaperTrader:
         assert not r2.executed
         assert "anti-hedge" in r2.reason
 
+    def test_resolution_rejects_far_out_naive_date(self):
+        """Gamma returns naive date strings like '2026-06-30' — must still reject."""
+        conn = _make_conn()
+        config = _make_config(enabled=True, max_days_to_resolution=30)
+        trader = PaperTrader(config, conn)
+
+        trade = self._make_trade(condition_id="cond_far")
+        score = self._make_score(8.0)
+        tid = _insert_dummy_trade(conn, condition_id="cond_far")
+        sid = _insert_dummy_signal(conn, tid)
+
+        # Insert market with naive date string (no timezone), 100+ days out
+        db.upsert_market(conn, {
+            "condition_id": "cond_far",
+            "question": "Trump out by June 30?",
+            "slug": "trump-out",
+            "volume": 500_000,
+            "volume_24hr": 50_000,
+            "outcome_prices": "[0.10, 0.90]",
+            "end_date": "2026-12-31",  # naive, no timezone — the bug
+            "last_fetched": "2026-03-21T00:00:00+00:00",
+        })
+
+        result = trader.maybe_trade(trade, score, tid, sid)
+        assert not result.executed
+        assert "resolves in" in result.reason
+
+    def test_resolution_allows_near_term_naive_date(self):
+        """Near-term naive dates should pass through."""
+        conn = _make_conn()
+        config = _make_config(enabled=True, max_days_to_resolution=30)
+        trader = PaperTrader(config, conn)
+
+        trade = self._make_trade(condition_id="cond_near")
+        score = self._make_score(8.0)
+        tid = _insert_dummy_trade(conn, condition_id="cond_near")
+        sid = _insert_dummy_signal(conn, tid)
+
+        # Insert market resolving tomorrow (naive date)
+        from datetime import datetime, timedelta, timezone
+        tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")
+        db.upsert_market(conn, {
+            "condition_id": "cond_near",
+            "question": "Resolves tomorrow",
+            "slug": "near-term",
+            "volume": 500_000,
+            "volume_24hr": 50_000,
+            "outcome_prices": "[0.50, 0.50]",
+            "end_date": tomorrow,
+            "last_fetched": "2026-03-21T00:00:00+00:00",
+        })
+
+        result = trader.maybe_trade(trade, score, tid, sid)
+        assert result.executed
+
     def test_summary_stats(self):
         conn = _make_conn()
         config = _make_config(enabled=True)
