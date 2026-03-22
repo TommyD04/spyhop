@@ -116,3 +116,10 @@ max_exposure_pct = 0.40
 max_concurrent = 100
 min_score = 5.0                   # TBD: validate in Slice 0
 max_days_to_resolution = 30
+
+# ── Resolution Poller ─────────────────────────────
+# Thesis-agnostic: polls Gamma API for resolved markets and closes paper positions
+
+[resolution]
+poll_interval_minutes = 15        # Background poller frequency
+request_delay_seconds = 1.0       # Rate limit between Gamma API calls

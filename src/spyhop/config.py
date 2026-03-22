@@ -82,6 +82,10 @@ DEFAULTS: dict[str, Any] = {
         "max_concurrent": 10,
         "min_score": 7.0,
     },
+    "resolution": {
+        "poll_interval_minutes": 15,
+        "request_delay_seconds": 1.0,
+    },
 }
 
 # Default thesis definitions — used by _migrate_config() when building

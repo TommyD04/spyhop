@@ -106,6 +106,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("trades", "outcome", "TEXT"),
         ("trades", "outcome_index", "INTEGER"),
         ("markets", "end_date", "TEXT"),
+        ("markets", "closed", "INTEGER NOT NULL DEFAULT 0"),
         # Multi-thesis: tag signals and positions with thesis name
         ("signals", "thesis", "TEXT NOT NULL DEFAULT 'insider'"),
         ("signals", "detector_results", "TEXT"),
@@ -197,13 +198,17 @@ def upsert_wallet(conn: sqlite3.Connection, wallet: dict[str, Any]) -> None:
 
 
 def upsert_market(conn: sqlite3.Connection, market: dict[str, Any]) -> None:
-    """Insert or replace a market cache entry."""
+    """Insert or replace a market cache entry.
+
+    Accepts optional 'closed' key (0 or 1). Defaults to 0 for backward compat.
+    """
+    market.setdefault("closed", 0)
     conn.execute(
         """INSERT OR REPLACE INTO markets
            (condition_id, question, slug, volume, volume_24hr,
-            outcome_prices, end_date, last_fetched)
+            outcome_prices, end_date, last_fetched, closed)
            VALUES (:condition_id, :question, :slug, :volume, :volume_24hr,
-                   :outcome_prices, :end_date, :last_fetched)""",
+                   :outcome_prices, :end_date, :last_fetched, :closed)""",
         market,
     )
     conn.commit()
@@ -483,3 +488,55 @@ def delete_all_paper_positions(conn: sqlite3.Connection) -> int:
     cur = conn.execute("DELETE FROM paper_positions")
     conn.commit()
     return cur.rowcount
+
+
+# ── Resolution poller helpers ─────────────────────────────────────
+
+
+def get_open_position_condition_ids(
+    conn: sqlite3.Connection,
+) -> list[dict[str, Any]]:
+    """Return distinct condition_ids with OPEN positions, joined with slug from markets.
+
+    Each row has 'condition_id' and 'slug' (may be None if no market row).
+    """
+    rows = conn.execute(
+        """SELECT DISTINCT pp.condition_id, m.slug
+           FROM paper_positions pp
+           LEFT JOIN markets m ON pp.condition_id = m.condition_id
+           WHERE pp.status = 'OPEN'"""
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def close_position(
+    conn: sqlite3.Connection,
+    position_id: int,
+    exit_price: float,
+    exit_timestamp: str,
+    realized_pnl: float,
+) -> None:
+    """Close a paper position by setting status=RESOLVED and P&L fields."""
+    conn.execute(
+        """UPDATE paper_positions
+           SET status = 'RESOLVED',
+               exit_price = ?,
+               exit_timestamp = ?,
+               realized_pnl = ?
+           WHERE id = ? AND status = 'OPEN'""",
+        (exit_price, exit_timestamp, realized_pnl, position_id),
+    )
+    conn.commit()
+
+
+def get_open_positions_for_condition(
+    conn: sqlite3.Connection,
+    condition_id: str,
+) -> list[dict[str, Any]]:
+    """Return all OPEN paper positions for a given condition_id."""
+    rows = conn.execute(
+        """SELECT * FROM paper_positions
+           WHERE condition_id = ? AND status = 'OPEN'""",
+        (condition_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]

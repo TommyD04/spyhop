@@ -18,6 +18,7 @@ from rich.text import Text
 from spyhop.detector import build_scorer, build_sports_scorer
 from spyhop.detector.base import DetectionContext, ScoreResult
 from spyhop.ingestor.rtds import stream_trades
+from spyhop.paper.resolver import ResolutionPoller
 from spyhop.profiler.event import EventCache
 from spyhop.profiler.market import MarketCache
 from spyhop.profiler.wallet import WalletCache
@@ -454,6 +455,20 @@ async def watch(config: dict[str, Any], conn: sqlite3.Connection) -> None:
 
         live.update(_build_table(trade_buffer, trade_count, connected, paper_stats))
 
+    # Start background resolution poller if any paper trader is active
+    any_paper_active = any(tp["paper_trader"] for tp in thesis_pipelines)
+    resolution_task = None
+    if any_paper_active:
+        res_cfg = config.get("resolution", {})
+        poller = ResolutionPoller(
+            conn=conn,
+            gamma_url=config["market_cache"]["gamma_url"],
+            poll_interval_minutes=res_cfg.get("poll_interval_minutes", 15),
+            request_delay_seconds=res_cfg.get("request_delay_seconds", 1.0),
+        )
+        resolution_task = asyncio.create_task(poller.run_forever())
+        log.info("Background resolution poller started")
+
     with live:
         stream_task = asyncio.create_task(stream_trades(config, handle_trade))
 
@@ -464,10 +479,17 @@ async def watch(config: dict[str, Any], conn: sqlite3.Connection) -> None:
             pass
         finally:
             stream_task.cancel()
+            if resolution_task:
+                resolution_task.cancel()
             try:
                 await stream_task
             except asyncio.CancelledError:
                 pass
+            if resolution_task:
+                try:
+                    await resolution_task
+                except asyncio.CancelledError:
+                    pass
             await client.aclose()
 
     log.info("Watch stopped. %d trades recorded.", trade_count)
@@ -763,3 +785,72 @@ def paper_reset(conn: sqlite3.Connection, confirm: bool = False) -> None:
 
     deleted = db.delete_all_paper_positions(conn)
     console.print(f"[green]Deleted {deleted} paper positions.[/]")
+
+
+async def resolve_once(config: dict[str, Any], conn: sqlite3.Connection) -> None:
+    """Run a single resolution cycle and print results."""
+    console = Console()
+
+    res_cfg = config.get("resolution", {})
+    poller = ResolutionPoller(
+        conn=conn,
+        gamma_url=config["market_cache"]["gamma_url"],
+        poll_interval_minutes=res_cfg.get("poll_interval_minutes", 15),
+        request_delay_seconds=res_cfg.get("request_delay_seconds", 1.0),
+    )
+
+    console.print("[dim]Checking open positions for resolved markets...[/]")
+    result = await poller.poll_once()
+
+    if result.markets_checked == 0 and result.errors == 0:
+        console.print("[dim]No open paper positions to check.[/]")
+        return
+
+    # Summary table
+    table = Table(title="Resolution Cycle Results", expand=True)
+    table.add_column("Metric", style="bold", width=25)
+    table.add_column("Value", justify="right", width=15)
+
+    table.add_row("Markets checked", str(result.markets_checked))
+    table.add_row("Markets resolved", str(result.markets_resolved))
+    table.add_row("Positions resolved", str(result.positions_resolved))
+    table.add_row("Errors", str(result.errors))
+
+    console.print(table)
+
+    if result.resolutions:
+        # Detail table for resolved positions
+        detail = Table(title="Resolved Positions", expand=True)
+        detail.add_column("ID", width=5, justify="right")
+        detail.add_column("Thesis", width=8)
+        detail.add_column("Market", ratio=1)
+        detail.add_column("Result", width=6)
+        detail.add_column("Entry", justify="right", width=7)
+        detail.add_column("Exit", justify="right", width=7)
+        detail.add_column("P&L", justify="right", width=12)
+
+        total_pnl = 0.0
+        for res in result.resolutions:
+            total_pnl += res.realized_pnl
+            pnl_str = f"${res.realized_pnl:+,.2f}"
+            pnl_style = "green" if res.realized_pnl >= 0 else "red"
+            outcome_style = "green" if res.outcome == "WIN" else "red"
+
+            detail.add_row(
+                str(res.position_id),
+                res.thesis[:8],
+                res.market_question[:50],
+                Text(res.outcome, style=outcome_style),
+                f"{res.entry_price * 100:.1f}\u00a2",
+                f"{res.exit_price * 100:.1f}\u00a2",
+                Text(pnl_str, style=pnl_style),
+            )
+
+        console.print(detail)
+
+        pnl_style = "green" if total_pnl >= 0 else "red"
+        console.print(
+            f"\n[bold]Total realized P&L:[/] [{pnl_style}]${total_pnl:+,.2f}[/]"
+        )
+    else:
+        console.print("[dim]No positions resolved this cycle.[/]")
