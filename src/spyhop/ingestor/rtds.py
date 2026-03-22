@@ -33,6 +33,53 @@ SUBSCRIBE_MSG = json.dumps({
 
 PING_INTERVAL = 5       # seconds — required by RTDS protocol
 SILENCE_TIMEOUT = 300   # seconds — reconnect if no data for 5 min (known server bug)
+DEDUP_MAX_SIZE = 10_000  # max entries before clearing (~2.5 days at current volume)
+
+
+class _Deduplicator:
+    """In-memory dedup filter for RTDS duplicate messages.
+
+    RTDS sends ~57% of orders_matched events twice (identical tx_hash,
+    wallet, and asset_id within 0-2 seconds).  This filter sits between
+    parse and on_trade() so duplicates never enter the enrichment/scoring
+    pipeline.
+
+    Uses a plain set with a size cap.  When the set fills up, it resets
+    entirely — the oldest entries are hours/days old and irrelevant since
+    duplicates arrive within seconds.  At ~4K trades/day above threshold,
+    10K entries covers ~2.5 days with zero risk of false positives.
+    """
+
+    def __init__(self, max_size: int = DEDUP_MAX_SIZE) -> None:
+        self._seen: set[tuple[str, str, str]] = set()
+        self._max_size = max_size
+        self._dupes_blocked = 0
+
+    def is_duplicate(self, trade: dict[str, Any]) -> bool:
+        """Return True if this trade has already been seen."""
+        key = (
+            trade.get("tx_hash", ""),
+            trade.get("wallet", ""),
+            trade.get("asset_id", ""),
+        )
+        # Skip dedup if key fields are empty (shouldn't happen, but safe)
+        if not key[0]:
+            return False
+
+        if key in self._seen:
+            self._dupes_blocked += 1
+            return True
+
+        if len(self._seen) >= self._max_size:
+            log.info(
+                "Dedup cache full (%d entries, %d dupes blocked) — resetting",
+                len(self._seen), self._dupes_blocked,
+            )
+            self._seen.clear()
+            self._dupes_blocked = 0
+
+        self._seen.add(key)
+        return False
 
 
 def _parse_trade(raw: dict[str, Any]) -> dict[str, Any] | None:
@@ -114,6 +161,10 @@ async def stream_trades(
     threshold = config["ingestor"]["usd_threshold"]
     delay = config["ingestor"]["reconnect_delay_sec"]
 
+    # Dedup filter — persists across reconnects since RTDS can send a
+    # duplicate straddling a disconnect/reconnect boundary
+    dedup = _Deduplicator()
+
     while True:
         ping_task = None
         watchdog_task = None
@@ -155,6 +206,10 @@ async def stream_trades(
 
                     trade = _parse_trade(payload)
                     if trade and trade["usdc_size"] >= threshold:
+                        if dedup.is_duplicate(trade):
+                            log.debug("Dedup: skipping duplicate %s",
+                                      trade["tx_hash"][:12])
+                            continue
                         try:
                             await on_trade(trade)
                         except Exception:
