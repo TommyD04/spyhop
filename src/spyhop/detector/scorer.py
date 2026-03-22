@@ -16,7 +16,7 @@ from functools import reduce
 from operator import mul
 from typing import Any
 
-from spyhop.detector.base import DetectionContext, DetectorResult, ScoreResult
+from spyhop.detector.base import DetectionContext, ScoreResult
 
 
 class Scorer:

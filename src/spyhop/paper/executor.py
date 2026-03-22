@@ -51,7 +51,7 @@ class PaperExecutor:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
-    def execute(self, entry: PaperEntry) -> int:
+    def execute(self, entry: PaperEntry, thesis: str = "insider") -> int:
         """Insert a paper position, returns position ID."""
         position = {
             "trade_id": entry.trade_id,
@@ -67,6 +67,7 @@ class PaperExecutor:
             "score_at_entry": entry.score_at_entry,
             "wallet": entry.wallet,
             "entry_timestamp": entry.entry_timestamp,
+            "thesis": thesis,
         }
         return db.insert_paper_position(self._conn, position)
 

@@ -16,26 +16,53 @@ log = logging.getLogger(__name__)
 
 
 class PaperTrader:
-    """Top-level orchestrator: score threshold → risk check → execute."""
+    """Top-level orchestrator: score threshold → risk check → execute.
 
-    def __init__(self, config: dict[str, Any], conn: sqlite3.Connection) -> None:
-        self._risk = RiskEngine(config, conn)
+    Each PaperTrader instance is scoped to a single thesis. The thesis name
+    is stored on every position and signal, enabling independent capital
+    pools and per-thesis P&L tracking.
+    """
+
+    def __init__(
+        self,
+        config: dict[str, Any],
+        conn: sqlite3.Connection,
+        thesis: str = "insider",
+    ) -> None:
+        # Resolve thesis-specific config if available, else fall back to flat
+        thesis_cfg = config.get("thesis", {}).get(thesis, {})
+        if thesis_cfg:
+            paper_cfg = thesis_cfg.get("paper", config.get("paper", {}))
+            scorer_cfg = thesis_cfg.get("scorer", config.get("scorer", {}))
+            mm_cfg = thesis_cfg.get("detector", {}).get("mm_filter", {})
+            exclude_cats = set(thesis_cfg.get("exclude_categories", []))
+        else:
+            paper_cfg = config["paper"]
+            scorer_cfg = config["scorer"]
+            mm_cfg = config.get("detector", {}).get("mm_filter", {})
+            exclude_cats = set(config["paper"].get("blocked_categories", []))
+
+        # Build risk engine with thesis-scoped config
+        risk_config = {"paper": paper_cfg, "scorer": scorer_cfg}
+        self._risk = RiskEngine(risk_config, conn, thesis=thesis)
         self._executor = PaperExecutor(conn)
-        self._min_score = config["paper"].get(
-            "min_score", config["scorer"]["alert_threshold"]
-        )
-        self._capital = config["paper"]["starting_capital"]
-        self._max_days = config["paper"].get("max_days_to_resolution", 30)
-        self._blocked_categories: set[str] = set(
-            config["paper"].get("blocked_categories", [])
-        )
+        self._min_score = paper_cfg.get("min_score", scorer_cfg.get("alert_threshold", 7))
+        self._capital = paper_cfg["starting_capital"]
+        self._max_days = paper_cfg.get("max_days_to_resolution", 30)
+        self._blocked_categories = exclude_cats
+        self._thesis = thesis
+
         # MM filter config
-        mm_cfg = config.get("detector", {}).get("mm_filter", {})
         self._mm_enabled = mm_cfg.get("enabled", False)
         self._wallet_lookback_minutes = mm_cfg.get("wallet_lookback_minutes", 120)
         self._pair_max_gap_seconds = mm_cfg.get("pair_max_gap_seconds", 10)
         self._settle_delay = mm_cfg.get("settle_delay_seconds", 5)
         self._conn = conn
+
+    @property
+    def thesis(self) -> str:
+        """Thesis name for this trader instance."""
+        return self._thesis
 
     @property
     def min_score(self) -> float:
@@ -65,12 +92,12 @@ class PaperTrader:
             if signal_id is None:
                 return PaperTradeResult(executed=False, reason="no signal")
 
-            # Category blocklist — skip categories with no insider signal
+            # Category blocklist — skip categories with no signal for this thesis
             category = trade.get("primary_tag", "")
             if category and self._blocked_categories and category in self._blocked_categories:
                 log.info(
-                    "Paper trade rejected: blocked category %s, %s",
-                    category, trade.get("condition_id", "")[:12],
+                    "Paper trade rejected [%s]: blocked category %s, %s",
+                    self._thesis, category, trade.get("condition_id", "")[:12],
                 )
                 return PaperTradeResult(
                     executed=False, reason=f"blocked category: {category}",
@@ -94,12 +121,15 @@ class PaperTrader:
                     lookback_minutes=self._wallet_lookback_minutes,
                 ):
                     log.info(
-                        "Paper trade rejected: wallet traded opposite side within %dm, %s",
-                        self._wallet_lookback_minutes, cid[:12],
+                        "Paper trade rejected [%s]: wallet traded opposite side within %dm, %s",
+                        self._thesis, self._wallet_lookback_minutes, cid[:12],
                     )
                     return PaperTradeResult(
                         executed=False,
-                        reason=f"mm_filter: wallet opposite-side within {self._wallet_lookback_minutes}m",
+                        reason=(
+                            f"mm_filter: wallet opposite-side"
+                            f" within {self._wallet_lookback_minutes}m"
+                        ),
                     )
 
                 # Check 1: matched settlement pair within gap window
@@ -111,8 +141,8 @@ class PaperTrader:
                     max_gap_seconds=self._pair_max_gap_seconds,
                 ):
                     log.info(
-                        "Paper trade rejected: matched settlement pair within %ds, %s",
-                        self._pair_max_gap_seconds, cid[:12],
+                        "Paper trade rejected [%s]: matched settlement pair within %ds, %s",
+                        self._thesis, self._pair_max_gap_seconds, cid[:12],
                     )
                     return PaperTradeResult(
                         executed=False,
@@ -131,8 +161,8 @@ class PaperTrader:
                         days_out = (end_dt - datetime.now(timezone.utc)).days
                         if days_out > self._max_days:
                             log.info(
-                                "Paper trade rejected: resolves in %d days (max %d), %s",
-                                days_out, self._max_days, condition_id[:12],
+                                "Paper trade rejected [%s]: resolves in %d days (max %d), %s",
+                                self._thesis, days_out, self._max_days, condition_id[:12],
                             )
                             return PaperTradeResult(
                                 executed=False,
@@ -156,8 +186,8 @@ class PaperTrader:
             decision = self._risk.evaluate(condition_id, outcome, score_result.composite)
 
             if not decision.allowed:
-                log.info("Paper trade rejected: %s (score=%.1f, %s)",
-                         decision.reject_reason, score_result.composite,
+                log.info("Paper trade rejected [%s]: %s (score=%.1f, %s)",
+                         self._thesis, decision.reject_reason, score_result.composite,
                          condition_id[:12])
                 return PaperTradeResult(executed=False, reason=decision.reject_reason)
 
@@ -179,11 +209,11 @@ class PaperTrader:
                 entry_timestamp=trade.get("timestamp", ""),
             )
 
-            position_id = self._executor.execute(entry)
+            position_id = self._executor.execute(entry, thesis=self._thesis)
             log.info(
-                "Paper entry: pos=%d, %s, $%.0f @ %.2f¢, score=%.1f",
-                position_id, condition_id[:12], decision.position_size_usd,
-                entry_price * 100, score_result.composite,
+                "Paper entry [%s]: pos=%d, %s, $%.0f @ %.2f¢, score=%.1f",
+                self._thesis, position_id, condition_id[:12],
+                decision.position_size_usd, entry_price * 100, score_result.composite,
             )
             return PaperTradeResult(
                 executed=True,
@@ -191,11 +221,12 @@ class PaperTrader:
                 size_usd=decision.position_size_usd,
             )
         except Exception:
-            log.exception("Paper trade error for trade_id=%s — skipping", trade_id)
+            log.exception("Paper trade error [%s] for trade_id=%s — skipping",
+                          self._thesis, trade_id)
             return PaperTradeResult(executed=False, reason="internal error")
 
     def get_summary_stats(self) -> dict[str, Any]:
-        """Lightweight DB query for dashboard title stats."""
-        open_count = db.count_open_positions(self._conn)
-        deployed = db.sum_deployed_capital(self._conn)
+        """Lightweight DB query for dashboard title stats (thesis-scoped)."""
+        open_count = db.count_open_positions(self._conn, thesis=self._thesis)
+        deployed = db.sum_deployed_capital(self._conn, thesis=self._thesis)
         return {"open_count": open_count, "deployed": deployed}

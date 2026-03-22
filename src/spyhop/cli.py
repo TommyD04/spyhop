@@ -15,8 +15,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from spyhop.detector import build_scorer
-from spyhop.detector.base import DetectionContext
+from spyhop.detector import build_scorer, build_sports_scorer
+from spyhop.detector.base import DetectionContext, ScoreResult
 from spyhop.ingestor.rtds import stream_trades
 from spyhop.profiler.event import EventCache
 from spyhop.profiler.market import MarketCache
@@ -111,6 +111,23 @@ def _format_tag(trade: dict[str, Any]) -> Text:
     return Text(tag[:8], style=style)
 
 
+_THESIS_ABBREV = {
+    "insider": "IN",
+    "sporty_investor": "SP",
+}
+
+
+def _format_thesis(trade: dict[str, Any]) -> Text:
+    """Format thesis abbreviation: IN (insider) or SP (sporty_investor)."""
+    thesis = trade.get("thesis", "")
+    abbrev = _THESIS_ABBREV.get(thesis, "")
+    if not abbrev:
+        return Text("-", style="dim")
+    if thesis == "sporty_investor":
+        return Text(abbrev, style="bright_green")
+    return Text(abbrev, style="dim")
+
+
 def _format_market(trade: dict[str, Any]) -> str:
     """Market question with outcome appended, e.g. 'O/U 6.5 → Under'."""
     question = trade.get("market_question", "") or trade.get("condition_id", "")[:12]
@@ -139,6 +156,7 @@ def _build_table(
     table.add_column("Wallet", width=15, no_wrap=True)
     table.add_column("Wlt", justify="right", width=4, no_wrap=True)
     table.add_column("Cat", width=8, no_wrap=True)
+    table.add_column("Th", width=2, no_wrap=True)
     table.add_column("F", justify="right", width=4, no_wrap=True)
     table.add_column("S", justify="right", width=4, no_wrap=True)
     table.add_column("N", justify="right", width=4, no_wrap=True)
@@ -164,6 +182,7 @@ def _build_table(
             _format_wallet_label(trade),
             _format_wlt(trade),
             _format_tag(trade),
+            _format_thesis(trade),
             _format_mult(trade.get("fresh_wallet_mult")),
             _format_mult(trade.get("size_anomaly_mult")),
             _format_mult(trade.get("niche_market_mult")),
@@ -175,13 +194,82 @@ def _build_table(
         )
 
     if not trades:
-        table.add_row("", "", "", "", "", "", "", "", "", "", "", "[dim]Waiting for whale trades...[/]")
+        table.add_row(
+            "", "", "", "", "", "", "", "", "", "", "", "",
+            "[dim]Waiting for whale trades...[/]",
+        )
 
     return table
 
 
+def _thesis_accepts(thesis_cfg: dict[str, Any], category: str) -> bool:
+    """Check if a trade's category matches this thesis's routing rules.
+
+    Rules:
+    - If categories is non-empty, trade must match one of them.
+    - If exclude_categories is non-empty, trade must NOT match any.
+    - Empty categories = accept all (minus exclusions).
+    """
+    include = thesis_cfg.get("categories", [])
+    exclude = thesis_cfg.get("exclude_categories", [])
+    if include and category not in include:
+        return False
+    if exclude and category in exclude:
+        return False
+    return True
+
+
+def _build_signal_dict(
+    trade_id: int,
+    trade: dict[str, Any],
+    score_result: ScoreResult,
+    thesis: str,
+) -> dict[str, Any]:
+    """Build a signal dict for db.insert_signal().
+
+    Insider signals populate the legacy fresh/size/niche columns.
+    Other theses set them to 1.0 and store all detector data in detector_results.
+    """
+    import json
+
+    sig: dict[str, Any] = {
+        "trade_id": trade_id,
+        "timestamp": trade["timestamp"],
+        "composite_score": score_result.composite,
+        "fresh_mult": 1.0, "fresh_detail": "",
+        "size_mult": 1.0, "size_detail": "",
+        "niche_mult": 1.0, "niche_detail": "",
+        "is_alert": int(score_result.alert),
+        "is_critical": int(score_result.critical),
+        "thesis": thesis,
+    }
+
+    if thesis == "insider":
+        # Legacy column mapping for backward compat
+        _col_map = {"fresh_wallet": "fresh", "size_anomaly": "size",
+                     "niche_market": "niche"}
+        for r in score_result.signals:
+            col = _col_map.get(r.name, r.name)
+            sig[f"{col}_mult"] = r.multiplier
+            sig[f"{col}_detail"] = r.detail
+        sig["detector_results"] = None
+    else:
+        # Non-insider: store all detector data in JSON
+        detector_data = {
+            r.name: {"multiplier": r.multiplier, "detail": r.detail}
+            for r in score_result.signals
+        }
+        sig["detector_results"] = json.dumps(detector_data)
+
+    return sig
+
+
 async def watch(config: dict[str, Any], conn: sqlite3.Connection) -> None:
-    """Main watch loop — stream trades and display in Rich live table."""
+    """Main watch loop — stream trades and display in Rich live table.
+
+    Runs a dual pipeline: each incoming trade is routed to matching theses
+    (insider and/or sporty_investor) based on its event category tag.
+    """
     max_rows = config["display"]["max_rows"]
     trade_buffer: deque[dict[str, Any]] = deque(maxlen=max_rows)
     trade_count = 0
@@ -219,15 +307,58 @@ async def watch(config: dict[str, Any], conn: sqlite3.Connection) -> None:
         max_trades=prof_cfg["max_trades_to_fetch"],
     )
 
-    scorer = build_scorer(config)
+    # ── Build thesis pipelines ──────────────────────────────────
+    # Each thesis has: name, config, scorer, paper_trader (optional), accepts_fn
+    thesis_pipelines: list[dict[str, Any]] = []
 
-    # Paper trading — lazy import, zero overhead when disabled
-    paper_trader = None
-    paper_stats: dict[str, Any] | None = None
-    if config.get("paper", {}).get("enabled", False):
-        from spyhop.paper.trader import PaperTrader
-        paper_trader = PaperTrader(config, conn)
-        paper_stats = paper_trader.get_summary_stats()
+    thesis_configs = config.get("thesis", {})
+    for thesis_name, thesis_cfg in thesis_configs.items():
+        if not thesis_cfg.get("enabled", True):
+            continue
+
+        # Build scorer
+        if thesis_name == "insider":
+            scorer = build_scorer(config)
+        elif thesis_name == "sporty_investor":
+            scorer = build_sports_scorer(config)
+        else:
+            log.warning("Unknown thesis '%s' — skipping", thesis_name)
+            continue
+
+        # Build paper trader if enabled
+        paper_trader = None
+        if thesis_cfg.get("paper", {}).get("enabled", False):
+            from spyhop.paper.trader import PaperTrader
+            paper_trader = PaperTrader(config, conn, thesis=thesis_name)
+
+        thesis_pipelines.append({
+            "name": thesis_name,
+            "config": thesis_cfg,
+            "scorer": scorer,
+            "paper_trader": paper_trader,
+        })
+
+    log.info("Loaded %d thesis pipelines: %s",
+             len(thesis_pipelines),
+             [t["name"] for t in thesis_pipelines])
+
+    # Aggregate paper stats across all theses for dashboard
+    def _get_paper_stats() -> dict[str, Any] | None:
+        total_count = 0
+        total_deployed = 0.0
+        any_active = False
+        for tp in thesis_pipelines:
+            pt = tp["paper_trader"]
+            if pt:
+                any_active = True
+                stats = pt.get_summary_stats()
+                total_count += stats["open_count"]
+                total_deployed += stats["deployed"]
+        if any_active:
+            return {"open_count": total_count, "deployed": total_deployed}
+        return None
+
+    paper_stats = _get_paper_stats()
 
     live = Live(_build_table(trade_buffer, trade_count, connected, paper_stats),
                 refresh_per_second=4)
@@ -237,7 +368,7 @@ async def watch(config: dict[str, Any], conn: sqlite3.Connection) -> None:
         connected = True
 
         try:
-            # Enrich with market metadata — always fetch for detector context
+            # ── Enrich (shared, thesis-agnostic) ────────────────
             market = None
             cid = trade.get("condition_id")
             if cid:
@@ -245,14 +376,12 @@ async def watch(config: dict[str, Any], conn: sqlite3.Connection) -> None:
                 if market and not trade.get("market_question"):
                     trade["market_question"] = market.question
 
-            # Enrich with event category tag
             event_slug = trade.get("event_slug")
             if event_slug:
                 event = await event_cache.get_event(event_slug)
                 if event:
                     trade["primary_tag"] = event.primary_tag
 
-            # Enrich with wallet profile (shallow — 1 HTTP call)
             profile = None
             wallet_addr = trade.get("wallet")
             if wallet_addr:
@@ -261,45 +390,55 @@ async def watch(config: dict[str, Any], conn: sqlite3.Connection) -> None:
                     trade["wallet_trade_count"] = profile.trade_count
                     trade["wallet_is_fresh"] = profile.is_fresh
 
-            # Score (synchronous — no I/O, pure arithmetic)
             context = DetectionContext(trade=trade, wallet_profile=profile, market=market)
-            score_result = scorer.score(context)
-            trade["score"] = score_result.composite
-            for sig in score_result.signals:
-                trade[f"{sig.name}_mult"] = sig.multiplier
 
-            # Persist trade
+            # Persist trade (always, regardless of thesis)
             trade_id = db.insert_trade(conn, trade)
 
-            # Persist signal if any detector fired
-            signal_id = None
-            if score_result.composite > 0:
-                # Map detector names to DB column prefixes
-                _col_map = {"fresh_wallet": "fresh", "size_anomaly": "size",
-                            "niche_market": "niche"}
-                sig = {"trade_id": trade_id, "timestamp": trade["timestamp"],
-                       "composite_score": score_result.composite,
-                       "fresh_mult": 1.0, "fresh_detail": "",
-                       "size_mult": 1.0, "size_detail": "",
-                       "niche_mult": 1.0, "niche_detail": "",
-                       "is_alert": int(score_result.alert),
-                       "is_critical": int(score_result.critical)}
-                for r in score_result.signals:
-                    col = _col_map.get(r.name, r.name)
-                    sig[f"{col}_mult"] = r.multiplier
-                    sig[f"{col}_detail"] = r.detail
-                signal_id = db.insert_signal(conn, sig)
+            # ── Route to matching theses ────────────────────────
+            tag = trade.get("primary_tag", "")
+            any_paper_entry = False
 
-            # Paper trading (with optional settle delay for MM filter)
-            if paper_trader:
-                settle_delay = paper_trader.settle_delay
-                if settle_delay > 0 and score_result.composite >= paper_trader.min_score:
-                    await asyncio.sleep(settle_delay)
-                paper_result = paper_trader.maybe_trade(
-                    trade, score_result, trade_id, signal_id
-                )
-                if paper_result and paper_result.executed:
-                    trade["paper_entry"] = True
+            for tp in thesis_pipelines:
+                thesis_name = tp["name"]
+                thesis_cfg = tp["config"]
+                scorer = tp["scorer"]
+                paper_trader = tp["paper_trader"]
+
+                if not _thesis_accepts(thesis_cfg, tag):
+                    continue
+
+                # Score
+                score_result = scorer.score(context)
+
+                # Track highest score for display (across theses)
+                if score_result.composite > trade.get("score", 0):
+                    trade["score"] = score_result.composite
+                    trade["thesis"] = thesis_name
+                    for sig in score_result.signals:
+                        trade[f"{sig.name}_mult"] = sig.multiplier
+
+                # Persist signal if any detector fired
+                signal_id = None
+                if score_result.composite > 0:
+                    sig_dict = _build_signal_dict(
+                        trade_id, trade, score_result, thesis_name,
+                    )
+                    signal_id = db.insert_signal(conn, sig_dict)
+
+                # Paper trading
+                if paper_trader:
+                    settle_delay = paper_trader.settle_delay
+                    if settle_delay > 0 and score_result.composite >= paper_trader.min_score:
+                        await asyncio.sleep(settle_delay)
+                    paper_result = paper_trader.maybe_trade(
+                        trade, score_result, trade_id, signal_id,
+                    )
+                    if paper_result and paper_result.executed:
+                        any_paper_entry = True
+
+            if any_paper_entry:
+                trade["paper_entry"] = True
 
         except Exception:
             log.exception("handle_trade error for %s — skipping",
@@ -310,8 +449,8 @@ async def watch(config: dict[str, Any], conn: sqlite3.Connection) -> None:
         trade_count += 1
 
         # Refresh paper stats periodically
-        if paper_trader and (trade_count % 10 == 0 or trade.get("paper_entry")):
-            paper_stats = paper_trader.get_summary_stats()
+        if trade_count % 10 == 0 or trade.get("paper_entry"):
+            paper_stats = _get_paper_stats()
 
         live.update(_build_table(trade_buffer, trade_count, connected, paper_stats))
 
@@ -418,19 +557,31 @@ async def wallet_lookup(config: dict[str, Any], conn: sqlite3.Connection, addres
 async def history_view(
     config: dict[str, Any], conn: sqlite3.Connection,
     limit: int = 50, min_score: float = 0.0,
+    thesis: str | None = None,
 ) -> None:
-    """Display past detection signals sorted by score."""
+    """Display past detection signals sorted by score.
+
+    Optionally filter by thesis name (e.g. 'insider', 'sporty_investor').
+    """
     console = Console()
 
-    signals = db.get_recent_signals(conn, limit=limit, min_score=min_score)
+    signals = db.get_recent_signals(conn, limit=limit, min_score=min_score, thesis=thesis)
 
     if not signals:
-        console.print("[dim]No signals found.[/]")
+        filter_label = f" for thesis={thesis}" if thesis else ""
+        console.print(f"[dim]No signals found{filter_label}.[/]")
         return
 
-    table = Table(title=f"Detection Signals (min score {min_score})", expand=True)
+    title = f"Detection Signals (min score {min_score}"
+    if thesis:
+        abbrev = _THESIS_ABBREV.get(thesis, thesis)
+        title += f", thesis={abbrev}"
+    title += ")"
+
+    table = Table(title=title, expand=True)
     table.add_column("Time", style="dim", width=19, no_wrap=True)
     table.add_column("Wallet", width=13, no_wrap=True)
+    table.add_column("Th", width=2, no_wrap=True)
     table.add_column("Score", justify="right", width=5, no_wrap=True)
     table.add_column("F", justify="right", width=4, no_wrap=True)
     table.add_column("S", justify="right", width=4, no_wrap=True)
@@ -456,9 +607,13 @@ async def history_view(
             return Text("-", style="dim")
 
         ts = s.get("timestamp", "")
+        sig_thesis = s.get("thesis", "insider")
+        thesis_text = _format_thesis({"thesis": sig_thesis})
+
         table.add_row(
             ts[:19],
             _truncate_wallet(s.get("wallet", "")),
+            thesis_text,
             score_text,
             _mult_text(s.get("fresh_mult", 1.0)),
             _mult_text(s.get("size_mult", 1.0)),

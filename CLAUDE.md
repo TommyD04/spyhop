@@ -267,9 +267,7 @@ The closer a market is to resolution, the more suspicious a high-scoring trade b
 - [x] Cat column in dashboard (Politics, Sports, Crypto, Economy)
 - [x] Outcome display in market column (e.g. "O/U 6.5 → Under")
 
-### V4b — Market-Maker (MM) Filter (CURRENT PRIORITY — week of 2026-03-14)
-
-**Must complete before advancing to V5 or any other Phase 2 work.**
+### V4b — Market-Maker (MM) Filter (COMPLETE — 2026-03-21)
 
 Both-side trading was initially assumed to be non-directional noise (market-making, reward farming, in-play hedging). However, the §12 investigation of multi-wallet transaction mechanics (2026-03-15) significantly revised this understanding. Most apparent both-side activity is actually normal CLOB batch settlement — different wallets in the same `tx_hash` are independent makers and takers, not coordinated puppet wallets. Furthermore, the most prolific "both-side" wallet in the dataset (`0x2a2C`, 844 trades) turned out to be a sophisticated in-play sports bettor making informed directional adjustments, not a market maker.
 
@@ -285,9 +283,9 @@ See `research/V4B_FARM_DETECTION.md` for full analysis: §1–§10 cover origina
 
 Analysis of 29K trades (2026-03-06 to 2026-03-21) revealed that the composite scoring system already filters most systematic MMs naturally (deep trade histories → low fresh wallet scores). However, **5 of 9 paper positions (55.6%) were CLOB settlement noise** — both counterparties of a matched fill cleared the $10K threshold and scored high. Three targeted checks close the remaining gaps:
 
-- [ ] **Check 1 — Matched-pair detection** (5s delay + 10s window): Before executing a paper trade, wait 5 seconds for settlement counterparts to arrive in the DB, then check for any directionally opposite trade on the same condition_id within 10 seconds. Catches CLOB settlement pairs. Would have blocked 5/9 current positions.
-- [ ] **Check 2 — Same-wallet lookback** (2h window): Check if the same wallet traded the opposite effective outcome on the same condition_id within the last 2 hours. Catches burst MMs and position reversals. Would have blocked 1/9 additional (overlaps with Check 1).
-- [ ] **Check 3 — Portfolio anti-hedge** (safety rail): Before opening a position, check if the paper trader already holds ANY position on the same condition_id. Prevents the portfolio from holding both sides of a market.
+- [x] **Check 1 — Matched-pair detection** (7s delay + 14s window): Before executing a paper trade, wait 7 seconds for settlement counterparts to arrive in the DB, then check for any directionally opposite trade on the same condition_id within 14 seconds. Catches CLOB settlement pairs.
+- [x] **Check 2 — Same-wallet lookback** (2h window): Check if the same wallet traded the opposite effective outcome on the same condition_id within the last 2 hours. Catches burst MMs and position reversals.
+- [x] **Check 3 — Portfolio anti-hedge** (safety rail): Before opening a position, check if the paper trader already holds ANY position on the same condition_id. Prevents the portfolio from holding both sides of a market.
 
 Config: `[detector.mm_filter]` section with `enabled`, `settle_delay_seconds`, `pair_max_gap_seconds`, `wallet_lookback_minutes`.
 
@@ -302,19 +300,53 @@ Config: `[detector.mm_filter]` section with `enabled`, `settle_delay_seconds`, `
 **Deferred (separate workstream):**
 - [ ] Q4: Niche market low-odds outsized bets — undeveloped thesis. Would be a different thesis engine, not this filter.
 
-### Phase 2 — Enhanced Detection (next — after V4b)
+### V5 — P&L Tracking & Scoring Recalibration (CURRENT PRIORITY — 2026-03-21)
+
+**Empirical scoring analysis (31K trades, 2026-03-06 to 2026-03-21)** revealed that the composite scorer, while correctly identifying *unusual* trades, does not identify *profitable* ones:
+
+| Score Band | Resolved Count | Win Rate | Avg Return | Avg Entry Price |
+|------------|---------------|----------|------------|-----------------|
+| 7.0–7.9 | 51 signals | 45.1% | **+1.1%** | mid-price |
+| 8.0–8.9 | 77 signals | 16.9% | -10.4% | high-price |
+| 9.0–10.0 | 80 signals | 15.0% | -5.5% | near-certainty |
+
+**Root cause:** Score 9-10 signals have all three detectors maxed (fresh=3.0, size=3.0, niche=2.5). This pattern correlates with fresh wallets making large bets on tiny near-certainty markets — not insiders trading at informative prices. The resolved win rate of 61% masks negative EV because winners entered at $0.89 avg (pennies upside) while losers entered at $0.35 avg (total loss).
+
+**Key finding:** The 7.0–7.9 band is the only one with positive average returns. These are moderate-conviction signals — typically 2 of 3 detectors firing — at informative entry prices ($0.30–0.70).
+
+**By category (resolved):** Politics 3-0 (100%), Unknown 13-4 (76.5%), Sports 9-12 (42.9%).
+
+The SYNTHESIS.md score-to-correctness mapping (`score 7→70%, 8→80%, 9→85%, 10→90%`) is invalidated by actual data. Recalibration is needed but requires more resolved outcomes.
+
+**Phase A — Build now (infrastructure, scoring-independent):**
+- [ ] **A1: Resolution poller** — periodic task polls Gamma API for resolved markets, closes paper positions, computes P&L. Schema already has `exit_price`, `exit_timestamp`, `realized_pnl` columns.
+- [ ] **A2: P&L analytics** — `spyhop report` CLI command with win rate by score band, category, entry price range, cumulative P&L curve.
+- [ ] **A3: Entry price distribution logging** — query views over existing `trades` + `signals` tables.
+- [ ] **A4: Backfill historical resolutions** — one-time script to poll Gamma for all 208 alert-signal markets and record outcomes. Jump-starts calibration dataset before poller is running.
+
+**Phase B — Recalibrate scoring (needs Phase A data, ~100+ resolved signals):**
+- [ ] **B1: Entry price modifier** — dampen composite score on near-certainty entries ($0.85+), neutral for informative range ($0.30–0.70). Highest-impact single change. Proposed: multiply score by price curve (0.5x at extremes, 1.0x at midrange).
+- [ ] **B2: Category-weighted scoring** — boost Politics (highest alert rate, 100% resolved win rate), evaluate Sports dampening. Needs 50+ resolved per category.
+- [ ] **B3: Kelly integration** — replace linear `score / threshold` sizing with full Kelly. Requires empirical score-to-correctness curve from V5 data to replace the invalidated theoretical mapping.
+- [ ] **B4: Threshold analysis** — determine if the alert threshold should remain at 7.0 or shift, based on which bands actually produce positive EV.
+
+**Phase C — Advanced (needs months of V5 data):**
+- [ ] Per-category exposure limits (max 20% of bankroll per category)
+- [ ] Daily/weekly loss circuit breakers (10%/20% of bankroll)
+- [ ] Win-rate-based wallet tagging (which wallets are profitable to follow?)
+- [ ] Strategy classification: INSIDER vs INFORMED vs FARM
+
+### Phase 2 — Enhanced Detection (after V5)
 - [x] V4: Paper trading (risk engine + PaperExecutor)
-- [ ] V5: P&L tracking (resolution poller)
+- [ ] V5: P&L tracking & scoring recalibration (see V5 section above)
 - [ ] DBSCAN temporal clustering (coordinated wallet timing)
 - [ ] Funding chain tracing (Polygon RPC: where did wallet funds come from?)
 - [ ] Historical win-rate analysis via Goldsky subgraphs
 - [ ] Wallet tagging / watchlist system
 - [x] Reward farmer / MM detection: implemented in V4b as three-check MM filter (matched-pair detection, wallet lookback, portfolio anti-hedge). See V4b section.
 - [x] **Anti-hedge filter**: implemented in V4b as Check 3 (portfolio anti-hedge in risk.py). Blocks any paper position on a condition_id where a position already exists.
-- [x] **Resolution proximity filter**: hard 30-day cutoff implemented in V4b Q3. `max_days_to_resolution = 30` in config.toml. Score dampening (SPECULATIVE/EARLY/HOT/IMMINENT bands) deferred to future refinement.
-- [ ] Per-category exposure limits (max 20% of bankroll per category — prevents correlated bets, e.g., all UFC fights resolving same night). Source: RQ4 §6.2, SYNTHESIS.md §1.1
-- [ ] Daily/weekly loss circuit breakers (10%/20% of bankroll) and consecutive-loss pause (3 losses). Requires V5 resolution data
-- [ ] Category-weighted scoring (Crypto already excluded via V4b Q5; future: Politics insider risk > Sports score adjustments)
+- [x] **Resolution proximity filter**: hard 30-day cutoff implemented in V4b Q3. `max_days_to_resolution = 30` in config.toml. Score dampening (SPECULATIVE/EARLY/HOT/IMMINENT bands) deferred to Phase B recalibration.
+- [ ] Category-weighted scoring (Crypto excluded via V4b Q5; Politics/Sports adjustments in V5 Phase B)
 - [ ] Tag-based filtering (e.g., "only show Politics")
 
 ### Phase 3 — TUI & Live Trading

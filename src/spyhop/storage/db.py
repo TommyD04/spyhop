@@ -102,13 +102,17 @@ CREATE INDEX IF NOT EXISTS idx_paper_condition ON paper_positions(condition_id);
 
 def _migrate(conn: sqlite3.Connection) -> None:
     """Add columns and indices to existing tables."""
-    for table, col, typ in [
+    for table, col, typ_default in [
         ("trades", "outcome", "TEXT"),
         ("trades", "outcome_index", "INTEGER"),
         ("markets", "end_date", "TEXT"),
+        # Multi-thesis: tag signals and positions with thesis name
+        ("signals", "thesis", "TEXT NOT NULL DEFAULT 'insider'"),
+        ("signals", "detector_results", "TEXT"),
+        ("paper_positions", "thesis", "TEXT NOT NULL DEFAULT 'insider'"),
     ]:
         try:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ_default}")
         except sqlite3.OperationalError:
             pass  # Column already exists
 
@@ -120,6 +124,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
         )
     except sqlite3.OperationalError:
         pass
+
+    # Multi-thesis: indices for thesis-scoped queries
+    for idx_sql in [
+        "CREATE INDEX IF NOT EXISTS idx_signals_thesis ON signals(thesis)",
+        "CREATE INDEX IF NOT EXISTS idx_paper_thesis ON paper_positions(thesis)",
+    ]:
+        try:
+            conn.execute(idx_sql)
+        except sqlite3.OperationalError:
+            pass
 
 
 def init_db(path: Path) -> sqlite3.Connection:
@@ -186,23 +200,35 @@ def upsert_market(conn: sqlite3.Connection, market: dict[str, Any]) -> None:
     """Insert or replace a market cache entry."""
     conn.execute(
         """INSERT OR REPLACE INTO markets
-           (condition_id, question, slug, volume, volume_24hr, outcome_prices, end_date, last_fetched)
-           VALUES (:condition_id, :question, :slug, :volume, :volume_24hr, :outcome_prices, :end_date, :last_fetched)""",
+           (condition_id, question, slug, volume, volume_24hr,
+            outcome_prices, end_date, last_fetched)
+           VALUES (:condition_id, :question, :slug, :volume, :volume_24hr,
+                   :outcome_prices, :end_date, :last_fetched)""",
         market,
     )
     conn.commit()
 
 
 def insert_signal(conn: sqlite3.Connection, signal: dict[str, Any]) -> int:
-    """Insert a detection signal. Returns the row ID."""
+    """Insert a detection signal. Returns the row ID.
+
+    Accepts optional 'thesis' (default 'insider') and 'detector_results'
+    (JSON string) for multi-thesis support. Insider signals populate the
+    legacy fresh_mult/size_mult/niche_mult columns; sports signals set
+    them to 1.0 and store detector data in detector_results.
+    """
+    signal.setdefault("thesis", "insider")
+    signal.setdefault("detector_results", None)
     cur = conn.execute(
         """INSERT INTO signals
            (trade_id, timestamp, composite_score,
             fresh_mult, fresh_detail, size_mult, size_detail,
-            niche_mult, niche_detail, is_alert, is_critical)
+            niche_mult, niche_detail, is_alert, is_critical,
+            thesis, detector_results)
            VALUES (:trade_id, :timestamp, :composite_score,
                    :fresh_mult, :fresh_detail, :size_mult, :size_detail,
-                   :niche_mult, :niche_detail, :is_alert, :is_critical)""",
+                   :niche_mult, :niche_detail, :is_alert, :is_critical,
+                   :thesis, :detector_results)""",
         signal,
     )
     conn.commit()
@@ -246,19 +272,37 @@ def upsert_event(conn: sqlite3.Connection, event: dict[str, Any]) -> None:
 
 
 def get_recent_signals(
-    conn: sqlite3.Connection, limit: int = 50, min_score: float = 0.0
+    conn: sqlite3.Connection,
+    limit: int = 50,
+    min_score: float = 0.0,
+    thesis: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Return recent signals joined with trade data, sorted by score descending."""
-    rows = conn.execute(
-        """SELECT s.*, t.wallet, t.side, t.usdc_size, t.price,
-                  t.market_question, t.condition_id
-           FROM signals s
-           JOIN trades t ON s.trade_id = t.id
-           WHERE s.composite_score >= ?
-           ORDER BY s.composite_score DESC
-           LIMIT ?""",
-        (min_score, limit),
-    ).fetchall()
+    """Return recent signals joined with trade data, sorted by score descending.
+
+    Optionally filter by thesis name (e.g. 'insider', 'sporty_investor').
+    """
+    if thesis:
+        rows = conn.execute(
+            """SELECT s.*, t.wallet, t.side, t.usdc_size, t.price,
+                      t.market_question, t.condition_id
+               FROM signals s
+               JOIN trades t ON s.trade_id = t.id
+               WHERE s.composite_score >= ? AND s.thesis = ?
+               ORDER BY s.composite_score DESC
+               LIMIT ?""",
+            (min_score, thesis, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT s.*, t.wallet, t.side, t.usdc_size, t.price,
+                      t.market_question, t.condition_id
+               FROM signals s
+               JOIN trades t ON s.trade_id = t.id
+               WHERE s.composite_score >= ?
+               ORDER BY s.composite_score DESC
+               LIMIT ?""",
+            (min_score, limit),
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -266,67 +310,117 @@ def get_recent_signals(
 
 
 def insert_paper_position(conn: sqlite3.Connection, position: dict[str, Any]) -> int:
-    """Insert a paper position. Returns the row ID."""
+    """Insert a paper position. Returns the row ID.
+
+    Position dict may include 'thesis' key (default 'insider').
+    """
+    position.setdefault("thesis", "insider")
     cur = conn.execute(
         """INSERT INTO paper_positions
            (trade_id, signal_id, condition_id, market_question, outcome,
             outcome_index, side, entry_price, size_usd, token_qty,
-            score_at_entry, wallet, entry_timestamp)
+            score_at_entry, wallet, entry_timestamp, thesis)
            VALUES (:trade_id, :signal_id, :condition_id, :market_question, :outcome,
                    :outcome_index, :side, :entry_price, :size_usd, :token_qty,
-                   :score_at_entry, :wallet, :entry_timestamp)""",
+                   :score_at_entry, :wallet, :entry_timestamp, :thesis)""",
         position,
     )
     conn.commit()
     return cur.lastrowid
 
 
-def get_open_positions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    """Return all open paper positions."""
-    rows = conn.execute(
-        "SELECT * FROM paper_positions WHERE status = 'OPEN' ORDER BY id DESC"
-    ).fetchall()
+def get_open_positions(
+    conn: sqlite3.Connection, thesis: str | None = None
+) -> list[dict[str, Any]]:
+    """Return open paper positions, optionally filtered by thesis."""
+    if thesis:
+        rows = conn.execute(
+            "SELECT * FROM paper_positions WHERE status = 'OPEN' AND thesis = ? ORDER BY id DESC",
+            (thesis,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM paper_positions WHERE status = 'OPEN' ORDER BY id DESC"
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
-def count_open_positions(conn: sqlite3.Connection) -> int:
-    """Return count of open paper positions."""
-    row = conn.execute(
-        "SELECT COUNT(*) FROM paper_positions WHERE status = 'OPEN'"
-    ).fetchone()
+def count_open_positions(
+    conn: sqlite3.Connection, thesis: str | None = None
+) -> int:
+    """Return count of open paper positions, optionally filtered by thesis."""
+    if thesis:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM paper_positions WHERE status = 'OPEN' AND thesis = ?",
+            (thesis,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM paper_positions WHERE status = 'OPEN'"
+        ).fetchone()
     return row[0]
 
 
-def sum_deployed_capital(conn: sqlite3.Connection) -> float:
-    """Return total USD deployed in open paper positions."""
-    row = conn.execute(
-        "SELECT COALESCE(SUM(size_usd), 0.0) FROM paper_positions WHERE status = 'OPEN'"
-    ).fetchone()
+def sum_deployed_capital(
+    conn: sqlite3.Connection, thesis: str | None = None
+) -> float:
+    """Return total USD deployed in open paper positions, optionally by thesis."""
+    if thesis:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(size_usd), 0.0)"
+            " FROM paper_positions WHERE status = 'OPEN' AND thesis = ?",
+            (thesis,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(size_usd), 0.0) FROM paper_positions WHERE status = 'OPEN'"
+        ).fetchone()
     return row[0]
 
 
-def has_position_on(conn: sqlite3.Connection, condition_id: str, outcome: str) -> bool:
+def has_position_on(
+    conn: sqlite3.Connection, condition_id: str, outcome: str, thesis: str | None = None
+) -> bool:
     """Check if there's already an open position on this condition+outcome."""
-    row = conn.execute(
-        """SELECT 1 FROM paper_positions
-           WHERE condition_id = ? AND outcome = ? AND status = 'OPEN'
-           LIMIT 1""",
-        (condition_id, outcome),
-    ).fetchone()
+    if thesis:
+        row = conn.execute(
+            """SELECT 1 FROM paper_positions
+               WHERE condition_id = ? AND outcome = ? AND status = 'OPEN' AND thesis = ?
+               LIMIT 1""",
+            (condition_id, outcome, thesis),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """SELECT 1 FROM paper_positions
+               WHERE condition_id = ? AND outcome = ? AND status = 'OPEN'
+               LIMIT 1""",
+            (condition_id, outcome),
+        ).fetchone()
     return row is not None
 
 
-def has_position_on_market(conn: sqlite3.Connection, condition_id: str) -> bool:
+def has_position_on_market(
+    conn: sqlite3.Connection, condition_id: str, thesis: str | None = None
+) -> bool:
     """Check if there's any open position on this condition_id (any outcome).
 
     Used by the anti-hedge check to prevent holding both sides of a market.
+    When thesis is specified, only checks positions for that thesis.
     """
-    row = conn.execute(
-        """SELECT 1 FROM paper_positions
-           WHERE condition_id = ? AND status = 'OPEN'
-           LIMIT 1""",
-        (condition_id,),
-    ).fetchone()
+    if thesis:
+        row = conn.execute(
+            """SELECT 1 FROM paper_positions
+               WHERE condition_id = ? AND status = 'OPEN' AND thesis = ?
+               LIMIT 1""",
+            (condition_id, thesis),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """SELECT 1 FROM paper_positions
+               WHERE condition_id = ? AND status = 'OPEN'
+               LIMIT 1""",
+            (condition_id,),
+        ).fetchone()
     return row is not None
 
 

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import sqlite3
 
-from spyhop.config import DEFAULTS, _deep_merge
+from spyhop.config import DEFAULTS, _deep_merge, _migrate_config
 from spyhop.detector.base import DetectorResult, ScoreResult
-from spyhop.paper.executor import PaperEntry, PaperExecutor, PortfolioSummary
-from spyhop.paper.risk import RiskDecision, RiskEngine
+from spyhop.paper.executor import PaperEntry, PaperExecutor
+from spyhop.paper.risk import RiskEngine
 from spyhop.paper.trader import PaperTrader
 from spyhop.storage import db
 
@@ -17,15 +17,15 @@ def _make_config(**overrides) -> dict:
     config = DEFAULTS.copy()
     if overrides:
         config = _deep_merge(config, {"paper": overrides})
-    return config
+    return _migrate_config(config)
 
 
 def _make_conn() -> sqlite3.Connection:
-    """Create an in-memory DB with full schema."""
+    """Create an in-memory DB with full schema + migrations."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    # Apply the full schema
     conn.executescript(db._SCHEMA)
+    db._migrate(conn)
     return conn
 
 
@@ -796,7 +796,12 @@ def _make_mm_config(**overrides) -> dict:
         "wallet_lookback_minutes": 120,
     }
     mm_defaults.update(overrides)
-    return _deep_merge(config, {"detector": {"mm_filter": mm_defaults}})
+    # Set on both flat and thesis paths (PaperTrader reads from thesis path)
+    config = _deep_merge(config, {"detector": {"mm_filter": mm_defaults}})
+    config = _deep_merge(config, {
+        "thesis": {"insider": {"detector": {"mm_filter": mm_defaults}}},
+    })
+    return config
 
 
 class TestMMFilterTrader:

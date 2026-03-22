@@ -18,3 +18,17 @@ spyhop = "spyhop.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/spyhop"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+# scripts: E402 = sys.stdout UTF-8 setup must precede spyhop imports
+#          E501 = table-formatted print statements aren't worth wrapping
+"scripts/*.py" = ["E402", "E501"]

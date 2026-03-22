@@ -35,6 +35,10 @@ def main() -> None:
     history_parser.add_argument(
         "--limit", type=int, default=50, help="Max signals to show (default: 50)"
     )
+    history_parser.add_argument(
+        "--thesis", type=str, default=None,
+        help="Filter by thesis name (e.g. 'insider', 'sporty_investor')",
+    )
 
     positions_parser = sub.add_parser("positions", help="Show open paper trading positions")
     positions_parser.add_argument(
@@ -86,7 +90,10 @@ def main() -> None:
 
     elif args.command == "history":
         try:
-            asyncio.run(history_view(config, conn, limit=args.limit, min_score=args.min_score))
+            asyncio.run(history_view(
+                config, conn, limit=args.limit, min_score=args.min_score,
+                thesis=args.thesis,
+            ))
         except KeyboardInterrupt:
             pass
         finally:
