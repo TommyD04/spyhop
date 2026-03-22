@@ -1,59 +1,246 @@
-# Spyhop — Polymarket Whale & Insider Tracker
+# Spyhop — Multi-Thesis Polymarket Signal Platform
 
 > A spyhop is when a whale pokes its head above the waterline to observe its surroundings.
-> This tool watches whale traders surface in prediction markets.
+> This tool watches whale traders surface in prediction markets — and decides which ones are worth following.
 
 ## Project Overview
 
-Local-first Python CLI that monitors Polymarket for suspicious "whale" trading behavior that could indicate insider information. Uses only public APIs and on-chain data — blockchain forensics, not private data access.
+Spyhop is a local-first Python CLI that monitors Polymarket for whale trading activity and evaluates it through multiple **investment theses**. Each thesis represents a different theory about why a large trade might be profitable to follow. The system uses only public APIs and on-chain data — blockchain forensics, not private data access.
+
+Not all whale trades are informative. Some are insider-driven, some reflect sharp sports analysis, some are pure noise (market-making settlement, crypto micro-markets, reward farming). Spyhop's job is to classify them, score the promising ones, and paper-trade the best signals — each thesis independently, with its own detectors, thresholds, and capital pool.
+
+## Investment Theses
+
+Spyhop runs three thesis classifications in parallel on every whale trade:
+
+### Insider (categories: everything except Sports and Crypto)
+
+**Core idea:** Fresh wallets making outsized bets on obscure markets may have non-public information about the outcome.
+
+A classic insider pattern: a brand-new Polymarket wallet places $25K on a niche political market with $15K daily volume, days before a surprise announcement. The detectors look for the combination of wallet freshness (no prior Polymarket history), trade size relative to market volume, and market obscurity.
+
+**Detectors:**
+| Detector | Signal | Multiplier Range |
+|----------|--------|-----------------|
+| `FreshWalletDetector` | Few or zero prior trades on Polymarket | 1.0–3.0x |
+| `SizeAnomalyDetector` | Trade outsized relative to market's 24h volume | 1.0–3.0x |
+| `NicheMarketDetector` | Low daily volume market (linear: smaller = more suspicious) | 1.0–2.5x |
+
+**Scoring:** Alert threshold 7.0, critical 9.0. Max composite = 10.0.
+
+**Empirical performance (31K trades, 2026-03-06 to 2026-03-21):** The 7.0–7.9 band is the only one with positive average returns (+1.1%). Scores 9-10 have 15% win rates because they correlate with near-certainty bets ($0.89 avg entry), not informative prices. See `scripts/backfill_resolutions.py` output and the V5 recalibration plan below.
+
+### Sporty Investor (categories: Sports only)
+
+**Core idea:** Experienced Polymarket bettors placing pre-game contrarian bets on moderately-thin sports markets may have an analytical edge over the market line.
+
+The insider detectors are exactly wrong for sports: fresh wallets placing big bets on sports are usually recreational gamblers, not insiders (match-fixing aside). The profitable sports signals come from the opposite profile — wallets with 6-25 prior trades, betting at underdog prices ($0.35–$0.50) on mid-volume markets ($10K–$25K daily) before the game starts.
+
+**Detectors:**
+| Detector | Signal | Multiplier Range |
+|----------|--------|-----------------|
+| `TimingGateDetector` | Pre-game vs. during/after game | 1.0 (pass) or 0.0 (kill) |
+| `EntryPriceDetector` | Contrarian sweet spot pricing ($0.35–$0.50) | 0.5–2.0x |
+| `NicheNonlinearDetector` | Volume sweet spot — not too thin, not too efficient | 1.0–2.0x |
+| `WalletExperienceDetector` | Experienced but not algorithmic (6-25 trades) | 1.0–1.8x |
+
+**Scoring:** Alert threshold 5.0, critical 8.0. Max composite = 10.0. The lower threshold reflects that sports signals are more frequent but individually weaker than insider signals.
+
+**Key design choice:** The timing gate is a binary kill switch, not a signal amplifier. Its `max_multiplier = 1.0` means it's excluded from the normalizer calculation — it can only block (0.0, zeroing the entire composite via multiplication), never boost. During-game and post-game trades are a fundamentally different thesis (live hedging, score-chasing) and should not score here.
+
+**Empirical basis:** Analysis of 11K+ sports signals in `scripts/sports_thesis_validation.py` and prior analyses in `scripts/sports_hypothesis.py`, `scripts/sports_analysis.py`, `scripts/sports_timing.py`. The $0.35–$0.50 sweet spot and 6-25 trade experience band emerged from this data.
+
+### Crypto (BLOCKED)
+
+**Core idea:** There is no edge.
+
+Empirical analysis (V4b Q5) showed that 91% of crypto signals on Polymarket are 5-minute binary micro-markets ("BTC Up or Down in next 5 min") at $0.99 average entry price. These are pure coin flips with no insider information possible on the timeframe. Crypto is excluded at the category level — trades are still ingested and stored (for future analysis), but never scored or paper-traded by either thesis.
 
 ## Architecture
 
 ```
-CLI (Rich live table + history view)
-    ↑
-DETECTOR (composite scorer)
-    ├─ FreshWalletDetector (< 5 prior trades)
-    ├─ SizeAnomalyDetector (outsized vs 24h volume)
-    └─ NicheMarketDetector (low-volume market bets)
-    ↑
-PROFILER (wallet + market + event metadata)
-    ├─ WalletCache  (Data API → trade count, freshness)
-    ├─ MarketCache  (Gamma API → volume, prices)
-    └─ EventCache   (Gamma API → category tags)
-    ↑
-INGESTOR (RTDS WebSocket)
-    ↑
-STORAGE (SQLite: trades, markets, wallets, events, signals)
+RTDS WebSocket (firehose: ~2,000 trades/day above $10K)
+  │
+  ▼
+INGESTOR ──► STORAGE (SQLite: trades table — always, all categories)
+  │
+  ▼
+PROFILER (shared enrichment, thesis-agnostic)
+  ├─ WalletCache   (Data API → trade count, history)
+  ├─ MarketCache   (Gamma API → volume, prices, end_date)
+  └─ EventCache    (Gamma API → event category tags)
+  │
+  ▼
+ROUTER (category-based, mutually exclusive)
+  │
+  ├─ Sports ──► SPORTY INVESTOR PIPELINE
+  │               ├─ Scorer (timing_gate × entry_price × niche_nonlinear × wallet_experience)
+  │               ├─ Signal stored (detector_results as JSON)
+  │               └─ PaperTrader ($5M pool, min_score 5.0, MM filter)
+  │
+  ├─ Crypto ──► BLOCKED (stored in trades table, never scored)
+  │
+  └─ All else ──► INSIDER PIPELINE
+                    ├─ Scorer (fresh_wallet × size_anomaly × niche_market)
+                    ├─ Signal stored (legacy F/S/N columns)
+                    └─ PaperTrader ($5M pool, min_score 7.0, MM filter)
+  │
+  ▼
+CLI (Rich live table: Time, Wallet, Wlt, Cat, Th, F, S, N, Score, Side, Amount, Price, Market)
 ```
 
-Pipeline: `ingestor → profiler → detector → cli`
+**Key architectural properties:**
+- **Fork, not diamond:** The pipeline splits at routing and never merges. Each thesis has fully independent scoring, signals, capital, and positions.
+- **Enrich once, score cheaply:** Wallet/market/event lookups (HTTP calls) happen once per trade, shared across theses. Scoring is pure math — no I/O.
+- **Record everything, filter late:** Trades table captures all $10K+ activity (thesis-agnostic). Signals table captures all scored trades (pre-MM-filter). Positions table captures only what passed all gates. Each layer enables retroactive analysis without re-running the live pipeline.
 
-Each stage has a single responsibility. Detectors are independent and pluggable.
+## Market-Maker Filter
+
+Both theses share a three-check execution filter that blocks CLOB settlement noise from becoming paper positions. The MM filter runs **after** scoring, inside `PaperTrader.maybe_trade()` — it gates paper execution, not signal recording.
+
+**Why this matters:** In V4b analysis, 5 of 9 paper positions (55.6%) were CLOB settlement artifacts — both counterparties of a matched fill cleared the $10K threshold and scored high enough to trade. See `research/V4B_FARM_DETECTION.md` for the full investigation (§1–§10 original findings, §12 tx_hash investigation, §13 three-check design).
+
+### The Three Checks
+
+**Check 1 — Matched-pair detection** (7s delay + 14s window)
+Before executing a paper trade, sleep 7 seconds for settlement counterparts to arrive in the DB, then query for any directionally opposite trade on the same `condition_id` within ±14 seconds. Catches CLOB settlement pairs where both sides of a fill clear the display threshold.
+
+**Check 2 — Same-wallet lookback** (2h window)
+Query for any trade from the same wallet on the same `condition_id` with the opposite `effective_outcome` within the last 2 hours. Catches burst market-makers, reward farmers doing round-trips, and position reversals that aren't directional signals.
+
+**Check 3 — Portfolio anti-hedge** (in RiskEngine)
+Before opening a position, check if the paper trader already holds any position on the same `condition_id`. Prevents the portfolio from holding both sides of a market (guaranteed loss from spread).
+
+### effective_outcome
+
+In a binary market, `BUY outcome_index=0` and `SELL outcome_index=1` are the same directional bet. The effective outcome normalizes this:
+```
+effective = outcome_index if side == 'BUY' else 1 - outcome_index
+```
+Two trades are "opposite" if their effective outcomes differ.
+
+### Config
+
+Each thesis has its own MM filter config under `[thesis.*.detector.mm_filter]`:
+```toml
+[thesis.insider.detector.mm_filter]
+enabled = true
+settle_delay_seconds = 7
+pair_max_gap_seconds = 14
+wallet_lookback_minutes = 120
+```
+
+## Scoring Model
+
+Both theses use the same `Scorer` class — a multiplicative composite model mapped to a 0–10 scale. Different detectors are plugged in per thesis.
+
+```
+product = detector1.multiplier × detector2.multiplier × ... × detectorN.multiplier
+composite = log10(product) × normalizer    (clamped 0–10)
+normalizer = 10.0 / log10(max_product)
+```
+
+- If `product ≤ 1.0` → composite = 0.0 (no signal worth recording)
+- If any detector returns 0.0 → product = 0 → composite = 0 (multiplicative kill switch)
+- Signals **compound** — fresh + large + niche is exponentially more suspicious than any single signal
+
+| Thesis | Detectors | Max Product | Normalizer | Alert | Critical |
+|--------|-----------|------------|------------|-------|----------|
+| Insider | fresh(3.0) × size(3.0) × niche(2.5) | 22.5 | 7.40 | ≥ 7.0 | ≥ 9.0 |
+| Sporty Investor | entry(2.0) × niche(2.0) × wallet(1.8) | 7.2 | 11.66 | ≥ 5.0 | ≥ 8.0 |
+
+Note: The sporty investor's timing gate has `max_multiplier = 1.0` and is excluded from the normalizer — it's a gate, not an amplifier.
+
+## Paper Trading
+
+Each thesis runs an independent `PaperTrader` with its own capital pool, exposure limits, and position tracking. Positions are tagged with their thesis name in the DB, enabling per-thesis P&L analysis.
+
+**Execution pipeline inside `maybe_trade()`:**
+```
+score ≥ min_score?  → no: reject
+signal exists?      → no: reject
+blocked category?   → yes: reject (Crypto)
+MM filter           → Check 2 (wallet lookback) → Check 1 (matched pair)
+resolution ≤ 30d?   → no: reject (too far out)
+SELL → BUY normalization
+RiskEngine          → duplicate? max concurrent? exposure limit? anti-hedge?
+PaperExecutor       → position created, stored with thesis tag
+```
+
+**Position sizing:** `size = base_position_usd × (score / alert_threshold)`, clamped to `max_position_pct × capital`.
+
+### Current Paper Config
+
+| Parameter | Insider | Sporty Investor |
+|-----------|---------|-----------------|
+| Capital pool | $5,000,000 | $5,000,000 |
+| Base position | $5,000 | $3,000 |
+| Min score | 7.0 | 5.0 |
+| Max position % | 10% | 5% |
+| Max exposure % | 50% | 40% |
+| Max concurrent | 100 | 100 |
+| Max days to resolution | 30 | 30 |
+| MM filter | enabled | enabled |
+
+## Config Structure
+
+Config uses a nested `[thesis.*]` structure. Shared infrastructure sections sit at the top level; each thesis has its own `detector`, `scorer`, and `paper` sub-sections.
+
+```toml
+# Shared infrastructure
+[ingestor]
+usd_threshold = 10_000
+[market_cache]
+[profiler]
+[event_cache]
+[display]
+
+# Per-thesis config
+[thesis.insider]
+enabled = true
+categories = []                          # empty = all non-excluded
+exclude_categories = ["Crypto", "Sports"]
+[thesis.insider.detector.fresh_wallet]
+[thesis.insider.detector.size_anomaly]
+[thesis.insider.detector.niche_market]
+[thesis.insider.detector.mm_filter]
+[thesis.insider.scorer]
+[thesis.insider.paper]
+
+[thesis.sporty_investor]
+enabled = true
+categories = ["Sports"]
+exclude_categories = []
+[thesis.sporty_investor.detector.timing_gate]
+[thesis.sporty_investor.detector.entry_price]
+[thesis.sporty_investor.detector.niche_nonlinear]
+[thesis.sporty_investor.detector.wallet_experience]
+[thesis.sporty_investor.detector.mm_filter]
+[thesis.sporty_investor.scorer]
+[thesis.sporty_investor.paper]
+```
+
+**Backward compatibility:** `_migrate_config()` in `config.py` handles bidirectional migration. Old flat configs (`[detector]`, `[scorer]`, `[paper]`) are auto-wrapped into `[thesis.insider.*]`. New thesis configs auto-populate flat keys from `thesis.insider` for backward compat. See `CONFIG_REFERENCE.md` for every parameter.
 
 ## Tech Stack
 
 | Component | Choice | Notes |
 |---|---|---|
 | Language | Python 3.11+ | `tomllib` in stdlib |
-| HTTP | `httpx` | Async-capable, used by official Polymarket SDK |
-| WebSocket | `websockets` | Lightweight, well-maintained |
+| HTTP | `httpx` | Async-capable |
+| WebSocket | `websockets` | Lightweight |
 | CLI output | `rich` | Tables, live displays, spinners |
-| TUI (Phase 2) | `textual` | Full TUI when ready |
 | Persistence | `sqlite3` | stdlib, zero external deps |
 | Config | TOML | Python-native in 3.11+ |
-| Market data | Gamma API direct | No SDK needed for metadata |
-| Order books | `py-clob-client` Level 0 | Official SDK, unauthenticated read-only |
+| Linter | `ruff` | Configured in `pyproject.toml` |
 
-### Minimal Dependencies
+### Dependencies
 ```
 httpx
 websockets
 rich
 py-clob-client
 ```
-
-Avoid heavy deps (no PostgreSQL, Redis, Docker, web3 unless needed).
 
 ## Polymarket API Reference
 
@@ -65,365 +252,230 @@ Avoid heavy deps (no PostgreSQL, Redis, Docker, web3 unless needed).
 - `GET /markets/{id}` — single market details
 - `GET /events` — paginated event list
 - `GET /events/{id}` — single event
-- Returns: question, slug, description, condition_id, clob_token_ids, volume, open_interest, outcome_prices
+- Returns: question, slug, description, condition_id, clob_token_ids, volume, open_interest, outcome_prices, endDateIso
 - Rate limit: ~60 req/min
 
 **CLOB API** — Order books & pricing
 - Base: `https://clob.polymarket.com`
-- `GET /book` — order book by token_id
-- `GET /prices`, `/midpoints`, `/spreads` — pricing data
-- `GET /last-trade-price` — most recent trade per token
+- `GET /book`, `/prices`, `/midpoints`, `/spreads`, `/last-trade-price`
 - `py-clob-client` Level 0 wraps these (no auth needed)
 - Rate limit: ~60 req/min
 
 **Data API** — Per-wallet trade history & profiles
 - Base: `https://data-api.polymarket.com`
-- `GET /activity?wallet=<addr>` — wallet trade history (the key endpoint for profiling)
-- `GET /positions?wallet=<addr>` — current positions
-- `GET /trades` — trade history (filterable by user or market)
-- `GET /profiles` — public user profiles
+- `GET /activity?wallet=<addr>` — wallet trade history (key endpoint for profiling)
 - Returns: proxyWallet, usdcSize, timestamp, conditionId, side, price, transactionHash
 - Rate limit: ~60 req/min, 100 results/page
 
-### Two WebSocket Systems (no auth for public channels)
+### RTDS WebSocket — Global Trade Firehose
 
-**RTDS WebSocket** — Global trade firehose (PRIMARY for live detection)
+The primary data source for live detection.
+
 - URL: `wss://ws-live-data.polymarket.com`
 - Subscribe: `{"action": "subscribe", "subscriptions": [{"topic": "activity", "type": "*"}]}`
-- **IMPORTANT**: `type: "trades"` receives NO data. Must use `"*"` wildcard. Actual messages arrive as `type: "orders_matched"`.
-- **IMPORTANT**: `filters` field must be omitted or empty string `""`. Empty object `{}` causes validation error.
-- Requires application-level `PING` text frame every 5s (not WebSocket-level ping). Responds with text `PONG`.
-- Known bug: data stream freezes after ~20 min. Implement 5-min silence timeout → reconnect.
-- Message envelope: `{"topic": "activity", "type": "orders_matched", "timestamp": <epoch_ms>, "payload": {...}, "connection_id": "..."}`
-- Payload fields: `asset`, `conditionId`, `eventSlug`, `slug`, `title`, `outcome`, `outcomeIndex`, `proxyWallet`, `pseudonym`, `name`, `side`, `size` (token qty, NOT USDC), `price`, `transactionHash`, `icon`, `bio`, `profileImage`
-- USDC value = `size * price` (size is outcome token quantity)
-- `title` field contains human-readable market question (no Gamma API needed for basic display)
-- Cloudflare-fronted; no special headers required
-- Official client: `@polymarket/real-time-data-client` (TypeScript; we implement our own in Python)
 
-**CLOB WebSocket** — Per-market price events
+**Protocol gotchas (hard-won):**
+- `type: "trades"` receives NOTHING. Must use `"*"` wildcard. Actual type is `orders_matched`.
+- `filters` must be omitted or empty string `""`. Empty object `{}` causes 400.
+- Requires application-level `PING` text frame every 5s (not WS-level ping).
+- `size` field is token qty, NOT USDC. Calculate: `usdc_size = size * price`.
+- Known bug: data freezes after ~20 min. Silence watchdog (5-min timeout) forces reconnect.
+- Cloudflare-fronted (CF-RAY: SEA datacenter).
+
+### CLOB WebSocket — Per-market price events
 - URL: `wss://ws-subscriptions-clob.polymarket.com/ws/market`
-- Subscribe with specific `assets_ids` (token IDs)
-- Events: `book` (full snapshot), `price_change`, `last_trade_price`
-- Useful for monitoring specific markets, not global scanning
+- Per-market subscription by `assets_ids`. Events: `book`, `price_change`, `last_trade_price`.
 
-### Goldsky Subgraphs (Phase 2 — historical backfill)
-
-Five specialized GraphQL subgraphs hosted on Goldsky:
-- **Activity**: `https://api.goldsky.com/api/public/project_cl6mb8i9h0003e201j6li0diw/subgraphs/activity-subgraph/0.0.4/gn`
-- **Positions**: `https://api.goldsky.com/api/public/project_cl6mb8i9h0003e201j6li0diw/subgraphs/positions-subgraph/0.0.7/gn`
-- Also: Orders, Open Interest, PnL subgraphs
+### Goldsky Subgraphs (future — historical backfill)
+- GraphQL subgraphs for Activity, Positions, Orders, Open Interest, PnL
 - Free tier: 100K queries/month via The Graph Network
-- Best for: deep wallet archaeology, historical P&L, position tracking
+- Best for: deep wallet archaeology, historical P&L
 
 ## Critical Implementation Notes
 
 ### Proxy Wallet Gotcha
 Polymarket uses **proxy wallet addresses** for on-chain settlement, NOT users' EOA wallets. A "fresh proxy" might belong to an experienced crypto user. Check trade count *on Polymarket* via the Data API, not raw Polygon transaction count.
 
-### Condition ID Mapping
-Subgraphs and CLOB return `conditionId` values, not human-readable market names. Always cross-reference with Gamma API to resolve to market questions. Cache this mapping aggressively.
-
 ### Timezone-Aware Datetime Handling
-All datetime comparisons in Spyhop **must** use timezone-aware objects. External APIs return a mix of formats:
-- **RTDS WebSocket**: ISO 8601 with offset (`2026-03-20T20:24:04+00:00`) — parses as aware
-- **Gamma API `endDateIso`**: Bare date strings (`2026-06-30`) — parses as **naive** (no timezone)
-- **Internal timestamps**: Always use `datetime.now(timezone.utc)`
+All datetime comparisons **must** use timezone-aware objects. External APIs return a mix:
+- **RTDS WebSocket**: ISO 8601 with offset (`2026-03-20T20:24:04+00:00`) — aware
+- **Gamma API `endDateIso`**: Bare date strings (`2026-06-30`) — **naive**
+- **Internal timestamps**: Always `datetime.now(timezone.utc)`
 
-Python raises `TypeError` when subtracting naive from aware datetimes. If this is caught by a broad `except` handler, the error is silently swallowed and the check becomes a no-op.
-
-**Rule:** After every `datetime.fromisoformat()` call, immediately normalize to UTC:
+**Rule:** After every `datetime.fromisoformat()` call, immediately normalize:
 ```python
 dt = datetime.fromisoformat(raw_string)
 if dt.tzinfo is None:
     dt = dt.replace(tzinfo=timezone.utc)
 ```
 
-**Bug history:** The V4b Q3 resolution proximity check (30-day cutoff) was silently inert from 2026-03-14 to 2026-03-21 because Gamma's naive `end_date` strings hit a `TypeError` in the `except (ValueError, TypeError): pass` handler. Three positions entered at 39, 100, and 284 days out. Fixed by normalizing `end_dt` to UTC before subtraction.
+**Bug history:** The resolution proximity gate was silently inert for a week (2026-03-14 to 2026-03-21) because Gamma's naive `end_date` strings hit a `TypeError` in a broad `except` handler. Three positions entered at 39, 100, and 284 days out. Fixed by normalizing to UTC before subtraction.
 
-### Pagination Patterns
-- Gamma API: offset-based (`limit` + `offset`)
-- CLOB API: cursor-based (`next_cursor`, terminal value `"LTE="`)
-- Data API: ~100 results/page, requires pagination loops
-- The Graph: max 1000 entities per query (`first` + `skip`)
+### CLOB Batch Settlement
+A single `tx_hash` contains fills from multiple independent wallets (makers + taker). Different wallets in the same TX are NOT the same operator. This is why the MM filter checks `condition_id` + `effective_outcome` + timing, not `tx_hash`.
 
-## Detection Signals (Composite Scoring)
+### Resilience Patterns
+- **Silence watchdog must be a separate asyncio task** — checking inside `async for msg in ws:` is dead code during actual silence.
+- **Callbacks in reconnect loops need error boundaries** — unhandled exception in `on_trade` kills the reconnect loop, not just the current connection.
+- **Belt-and-suspenders error boundaries**: inner (`handle_trade`) + outer (`stream_trades`) for unattended systems.
 
-Each detector returns a 0-N sub-score. Combined into a 0-10 composite. Signals should **compound**, not just add (fresh + large + niche = exponentially more suspicious).
+## Roadmap
 
-| Signal | What to Look For | Threshold (configurable) |
-|---|---|---|
-| Fresh wallet | < N prior Polymarket trades | Default: 5 trades |
-| Size anomaly | Trade size vs market daily volume | Default: > 2% of orderbook depth |
-| Niche market | Low-volume market targeted | Default: < $50K daily volume |
-| Timing cluster (Phase 2) | DBSCAN clustering of coordinated entries | Multiple wallets, short window |
-| Win rate anomaly (Phase 2) | Statistically improbable win streaks | Requires historical data |
+### Completed
 
-Alert threshold: score >= 7 out of 10.
+| Version | What | When |
+|---------|------|------|
+| V1 | RTDS ingestor → USD filter → SQLite → Rich live table | 2026-03 |
+| V2 | Wallet profiling (Data API + WalletCache) | 2026-03 |
+| V3 | 3 insider detectors + multiplicative composite scorer | 2026-03 |
+| V4 | Paper trading (RiskEngine + PaperExecutor + PaperTrader) | 2026-03 |
+| V4b | Signal quality improvements + three-check MM filter | 2026-03-21 |
+| Multi-thesis | Dual insider/sporty_investor pipelines, config migration, 4 sports detectors | 2026-03-21 |
 
-## Strategy Detection (Future Workstream)
+### V5 — P&L Tracking & Scoring Recalibration (CURRENT PRIORITY)
 
-Beyond raw suspicion scoring, Spyhop needs to **classify** detected trades into strategy types. Each type implies a different investment response.
+The composite scorer correctly identifies *unusual* trades but doesn't reliably identify *profitable* ones. Scores 9-10 correlate with near-certainty bets (15% win rate, negative EV), not informative insider prices. Recalibration requires resolved-outcome data we don't yet have at scale.
 
-### Strategy Types
+**Phase A — Infrastructure (build now):**
+- [ ] **A1: Resolution poller** — periodic task polls Gamma API for resolved markets, closes paper positions, computes P&L
+- [ ] **A2: P&L analytics** — `spyhop report` CLI command (win rate by score band, category, entry price range)
+- [ ] **A3: Entry price distribution logging** — query views over trades + signals
+- [ ] **A4: Backfill historical resolutions** — one-time script for existing 208 alert-signal markets
 
-| Label | What It Is | Spyhop Action | Investment Response |
-|-------|-----------|---------------|---------------------|
-| `FARM` | Reward/airdrop farming | Filter out (noise) | Ignore — no directional signal |
-| `INSIDER` | True insider information | High-confidence alert | Aggressive counter-trade: follow the position, size up, tight timeframe |
-| `INFORMED` | Edge from public info analysis | Moderate-confidence alert | Moderate counter-trade: follow direction, smaller size, wider timeframe |
+**Phase B — Recalibrate (needs ~100+ resolved signals):**
+- [ ] **B1: Entry price modifier** — dampen insider score on near-certainty entries ($0.85+)
+- [ ] **B2: Category-weighted scoring** — Politics has 100% resolved win rate; adjust multipliers
+- [ ] **B3: Kelly integration** — replace linear sizing with empirical score-to-correctness curve
+- [ ] **B4: Threshold analysis** — determine optimal alert thresholds from EV data
 
-### FARM Detection
-
-Scripted buy-sell round-trips to inflate volume for $POLY airdrop qualification.
-
-**Heuristic**: Tag as `FARM` when ALL of:
-- Same wallet (proxy address)
-- Same market (condition_id)
-- Opposite side (BUY ↔ SELL)
-- Time delta ≤ 120 seconds
-
-**Extended signals**:
-- Wallet cluster detection (multiple wallets with identical trading cadence, e.g. 61s intervals)
-- Round-trip P&L ≈ 0 or slightly negative (spread loss only)
-- Concentration on sports markets (45% of sports volume is wash trading per Columbia study)
-- Near-certainty markets (price > 95¢) with no directional conviction
-
-**See**: `research/REWARD_FARMING.md` for full analysis.
-
-### INSIDER Detection
-
-True non-public information — someone knows the outcome before the market does.
-
-**Distinguishing signals**:
-- Fresh wallet + large position + niche market (the current composite scorer)
-- **One-directional**: no hedging, no round-trip — conviction trade
-- **Timing**: position taken shortly before resolution or major news
-- **Market category**: Politics carries higher insider risk than Sports (Sports outcomes are harder to know in advance outside match-fixing). Crypto is excluded — empirical data shows 91% of crypto signals are 5-min binary micro-markets with no insider edge (see V4b Q5).
-- **Win rate anomaly**: statistically improbable accuracy across resolved markets (Phase 2, requires Goldsky backfill)
-- **Funding chain**: wallet funded shortly before trade, from a mixer or fresh source (Phase 2)
-
-### INFORMED Detection
-
-Edge derived from superior analysis of public information — not illegal, but still profitable to follow.
-
-**Distinguishing signals**:
-- **Established wallet** with moderate trade history (NOT fresh — they have a track record)
-- **Concentrated position**: large size on a specific outcome, but from a wallet with proven accuracy
-- **Category expertise**: wallet history shows specialization (e.g., only trades French politics, or only specific sports leagues). Note: Crypto excluded from paper trading (V4b Q5) — no informed-trader signal in micro-binary markets.
-- **Pre-event timing**: position taken hours/days before resolution, not minutes (insiders trade late; informed traders trade early when odds are mispriced)
-- **Historical P&L**: positive returns across resolved markets, but not impossibly so (60-70% accuracy vs insider's 90%+)
-
-### Resolution Proximity — Time-to-Resolve as a Signal Modifier
-
-The closer a market is to resolution, the more suspicious a high-scoring trade becomes. Insider information is **perishable** — it only exists when someone already knows the outcome. A fresh wallet betting $15K on "Iran ceasefire by June 30" in March is speculative; the same bet placed 48 hours before an announced deal is a red flag.
-
-**Proposed time bands**:
-
-| Time to Resolution | Label | Score Modifier | Rationale |
-|--------------------|-------|----------------|-----------|
-| > 30 days | `SPECULATIVE` | Dampen (0.5x) | Too far out for insider knowledge to exist; thesis-driven |
-| 7–30 days | `EARLY` | Neutral (1.0x) | Informed trader sweet spot — mispricing + analysis edge |
-| 1–7 days | `HOT` | Boost (1.5x) | Insider sweet spot — information exists, not yet public |
-| < 24 hours | `IMMINENT` | Boost (2.0x) | Highest insider risk, but also front-running public news |
-
-**Implementation considerations**:
-- Requires resolution date from Gamma API (`end_date_iso` or `closed` fields on the event/market)
-- Many markets don't have fixed end dates (e.g., "Will X happen by Y?" could resolve early on a YES outcome at any time)
-- For open-ended markets, use the stated deadline as the upper bound
-- Sports markets have known game times — high-precision resolution dates available
-- Political markets often have fixed dates (election day, hearing date) — moderate precision
-- Geopolitical/speculative markets ("ceasefire by June 30") — only the deadline is known, actual resolution could be any time before
-
-**Interaction with strategy types**:
-- `SPECULATIVE` + fresh wallet = likely just a gambler, not an insider. Dampen score.
-- `HOT` + fresh wallet + niche market = the classic insider pattern. Boost score.
-- `EARLY` + established wallet + category expertise = textbook `INFORMED`. Don't dampen — this is the signal you want to follow with moderate sizing.
-- `IMMINENT` + any wallet = could be insider OR someone reading breaking news faster. Requires cross-referencing with news timestamps to disambiguate.
-
-### Classification Priority
-
-1. **FARM filter first** — suppress the noise (highest volume of false positives today)
-2. **Resolution proximity second** — dampen speculative long-dated bets, boost trades near resolution (requires market end-date data)
-3. **INSIDER vs INFORMED separation third** — requires wallet history depth (Goldsky backfill) and win-rate tracking (resolution poller)
-4. **Category weighting fourth** — Crypto excluded entirely (V4b Q5); future: score multipliers by remaining event categories (Politics insider risk > Sports)
-
-## Phasing
-
-### Phase 1 — MVP (complete)
-- [x] V1: RTDS WebSocket connection + trade streaming
-- [x] V1: USD threshold filter, default $10K
-- [x] V1: Market metadata cache via Gamma API
-- [x] V1: Rich CLI `spyhop watch` live table
-- [x] V1: SQLite persistence (trades + markets)
-- [x] V1: TOML config file with layered defaults
-- [x] V2: Wallet profiling via Data API (trade count, history, freshness)
-- [x] V2: `spyhop wallet <addr>` deep lookup command
-- [x] V3: 3 detectors (fresh wallet, size anomaly, niche market)
-- [x] V3: Multiplicative composite scorer (0–10 scale)
-- [x] V3: Signals table + `spyhop history` command
-- [x] V3: F/S/N multiplier columns + Score column in watch table
-- [x] Event category tracking via Gamma `/events` API (EventCache)
-- [x] Cat column in dashboard (Politics, Sports, Crypto, Economy)
-- [x] Outcome display in market column (e.g. "O/U 6.5 → Under")
-
-### V4b — Market-Maker (MM) Filter (COMPLETE — 2026-03-21)
-
-Both-side trading was initially assumed to be non-directional noise (market-making, reward farming, in-play hedging). However, the §12 investigation of multi-wallet transaction mechanics (2026-03-15) significantly revised this understanding. Most apparent both-side activity is actually normal CLOB batch settlement — different wallets in the same `tx_hash` are independent makers and takers, not coordinated puppet wallets. Furthermore, the most prolific "both-side" wallet in the dataset (`0x2a2C`, 844 trades) turned out to be a sophisticated in-play sports bettor making informed directional adjustments, not a market maker.
-
-See `research/V4B_FARM_DETECTION.md` for full analysis: §1–§10 cover original empirical findings; §12 covers the tx_hash investigation that revised the conclusions.
-
-**Completed work (signal quality improvements):**
-- [x] Q1: Bumped shallow wallet profile limit from 6 to 25 (single API call, enables MM vs. newcomer distinction). Invalidated 1,619 stale cache entries.
-- [x] Q2: Fix event category slug mismatch — two-step lookup (exact then prefix) in EventCache.get_event() and db.get_event_by_prefix(). Coverage: 29% → 69%.
-- [x] Q3: Resolution proximity filter — hard 30-day cutoff (`max_days_to_resolution` in config.toml). Markets table stores `end_date` from Gamma API `endDateIso`. PaperTrader rejects trades on markets resolving >30 days out. **Bug fixed 2026-03-21:** Gamma returns naive date strings (no timezone); the original code raised `TypeError` on naive-vs-aware subtraction, silently caught by broad `except`, making the gate inert. Fixed by normalizing to UTC after parsing. See "Timezone-Aware Datetime Handling" in Critical Implementation Notes.
-- [x] Q5: Category blocklist — `blocked_categories = ["Crypto"]` in config.toml. Crypto is 91% 5-minute binary micro-markets (BTC/SOL/ETH Up or Down) at $0.99 avg price — no insider edge, pure noise.
-
-**MM filter — three-check approach (replaces earlier three-layer proposal):**
-
-Analysis of 29K trades (2026-03-06 to 2026-03-21) revealed that the composite scoring system already filters most systematic MMs naturally (deep trade histories → low fresh wallet scores). However, **5 of 9 paper positions (55.6%) were CLOB settlement noise** — both counterparties of a matched fill cleared the $10K threshold and scored high. Three targeted checks close the remaining gaps:
-
-- [x] **Check 1 — Matched-pair detection** (7s delay + 14s window): Before executing a paper trade, wait 7 seconds for settlement counterparts to arrive in the DB, then check for any directionally opposite trade on the same condition_id within 14 seconds. Catches CLOB settlement pairs.
-- [x] **Check 2 — Same-wallet lookback** (2h window): Check if the same wallet traded the opposite effective outcome on the same condition_id within the last 2 hours. Catches burst MMs and position reversals.
-- [x] **Check 3 — Portfolio anti-hedge** (safety rail): Before opening a position, check if the paper trader already holds ANY position on the same condition_id. Prevents the portfolio from holding both sides of a market.
-
-Config: `[detector.mm_filter]` section with `enabled`, `settle_delay_seconds`, `pair_max_gap_seconds`, `wallet_lookback_minutes`.
-
-**Key concept: `effective_outcome`** — In a binary market, `BUY outcome_index=0` and `SELL outcome_index=1` are the same directional bet. The effective outcome normalizes this: `effective = outcome_index if side == 'BUY' else 1 - outcome_index`. Two trades are opposite if their effective outcomes differ.
-
-> **Historical note**: The earlier three-layer proposal (Layer 0 portfolio anti-hedge, Layer 1 real-time lookback, Layer 2 wallet reputation) was put ON HOLD after the §12 investigation raised concerns about flagging in-play bettors. Analysis of 29K trades showed these concerns were valid but the problem was different than expected: the scoring system already handles in-play bettors (deep histories → low scores), while the real gap was CLOB settlement pairs that the old proposal didn't address. The three-check approach above supersedes the three-layer proposal. See `research/V4B_FARM_DETECTION.md` §13 for the analysis.
-
-**Remaining open questions:**
-1. Is the hub wallet (`0x2a2C`) profitable? Requires V5 resolution data. If profitable, this is a "follow the sharp" signal.
-2. Can we detect in-play position changes in real-time and ride along? Requires V5 to assess profitability first.
-
-**Deferred (separate workstream):**
-- [ ] Q4: Niche market low-odds outsized bets — undeveloped thesis. Would be a different thesis engine, not this filter.
-
-### V5 — P&L Tracking & Scoring Recalibration (CURRENT PRIORITY — 2026-03-21)
-
-**Empirical scoring analysis (31K trades, 2026-03-06 to 2026-03-21)** revealed that the composite scorer, while correctly identifying *unusual* trades, does not identify *profitable* ones:
-
-| Score Band | Resolved Count | Win Rate | Avg Return | Avg Entry Price |
-|------------|---------------|----------|------------|-----------------|
-| 7.0–7.9 | 51 signals | 45.1% | **+1.1%** | mid-price |
-| 8.0–8.9 | 77 signals | 16.9% | -10.4% | high-price |
-| 9.0–10.0 | 80 signals | 15.0% | -5.5% | near-certainty |
-
-**Root cause:** Score 9-10 signals have all three detectors maxed (fresh=3.0, size=3.0, niche=2.5). This pattern correlates with fresh wallets making large bets on tiny near-certainty markets — not insiders trading at informative prices. The resolved win rate of 61% masks negative EV because winners entered at $0.89 avg (pennies upside) while losers entered at $0.35 avg (total loss).
-
-**Key finding:** The 7.0–7.9 band is the only one with positive average returns. These are moderate-conviction signals — typically 2 of 3 detectors firing — at informative entry prices ($0.30–0.70).
-
-**By category (resolved):** Politics 3-0 (100%), Unknown 13-4 (76.5%), Sports 9-12 (42.9%).
-
-The SYNTHESIS.md score-to-correctness mapping (`score 7→70%, 8→80%, 9→85%, 10→90%`) is invalidated by actual data. Recalibration is needed but requires more resolved outcomes.
-
-**Phase A — Build now (infrastructure, scoring-independent):**
-- [ ] **A1: Resolution poller** — periodic task polls Gamma API for resolved markets, closes paper positions, computes P&L. Schema already has `exit_price`, `exit_timestamp`, `realized_pnl` columns.
-- [ ] **A2: P&L analytics** — `spyhop report` CLI command with win rate by score band, category, entry price range, cumulative P&L curve.
-- [ ] **A3: Entry price distribution logging** — query views over existing `trades` + `signals` tables.
-- [ ] **A4: Backfill historical resolutions** — one-time script to poll Gamma for all 208 alert-signal markets and record outcomes. Jump-starts calibration dataset before poller is running.
-
-**Phase B — Recalibrate scoring (needs Phase A data, ~100+ resolved signals):**
-- [ ] **B1: Entry price modifier** — dampen composite score on near-certainty entries ($0.85+), neutral for informative range ($0.30–0.70). Highest-impact single change. Proposed: multiply score by price curve (0.5x at extremes, 1.0x at midrange).
-- [ ] **B2: Category-weighted scoring** — boost Politics (highest alert rate, 100% resolved win rate), evaluate Sports dampening. Needs 50+ resolved per category.
-- [ ] **B3: Kelly integration** — replace linear `score / threshold` sizing with full Kelly. Requires empirical score-to-correctness curve from V5 data to replace the invalidated theoretical mapping.
-- [ ] **B4: Threshold analysis** — determine if the alert threshold should remain at 7.0 or shift, based on which bands actually produce positive EV.
-
-**Phase C — Advanced (needs months of V5 data):**
-- [ ] Per-category exposure limits (max 20% of bankroll per category)
-- [ ] Daily/weekly loss circuit breakers (10%/20% of bankroll)
-- [ ] Win-rate-based wallet tagging (which wallets are profitable to follow?)
+**Phase C — Advanced (needs months of data):**
+- [ ] Per-category exposure limits, loss circuit breakers
+- [ ] Win-rate-based wallet tagging ("follow the sharp" signals)
 - [ ] Strategy classification: INSIDER vs INFORMED vs FARM
+- [ ] Resolution proximity score modifier (SPECULATIVE/EARLY/HOT/IMMINENT bands)
 
-### Phase 2 — Enhanced Detection (after V5)
-- [x] V4: Paper trading (risk engine + PaperExecutor)
-- [ ] V5: P&L tracking & scoring recalibration (see V5 section above)
+### Future
+
 - [ ] DBSCAN temporal clustering (coordinated wallet timing)
 - [ ] Funding chain tracing (Polygon RPC: where did wallet funds come from?)
-- [ ] Historical win-rate analysis via Goldsky subgraphs
-- [ ] Wallet tagging / watchlist system
-- [x] Reward farmer / MM detection: implemented in V4b as three-check MM filter (matched-pair detection, wallet lookback, portfolio anti-hedge). See V4b section.
-- [x] **Anti-hedge filter**: implemented in V4b as Check 3 (portfolio anti-hedge in risk.py). Blocks any paper position on a condition_id where a position already exists.
-- [x] **Resolution proximity filter**: hard 30-day cutoff implemented in V4b Q3. `max_days_to_resolution = 30` in config.toml. Score dampening (SPECULATIVE/EARLY/HOT/IMMINENT bands) deferred to Phase B recalibration.
-- [ ] Category-weighted scoring (Crypto excluded via V4b Q5; Politics/Sports adjustments in V5 Phase B)
-- [ ] Tag-based filtering (e.g., "only show Politics")
-
-### Phase 3 — TUI & Live Trading
-- [ ] V6: Live trading (CLOB Level 2)
 - [ ] Textual TUI with live updating tables
+- [ ] V6: Live trading (CLOB Level 2, authenticated)
 - [ ] Discord / Telegram / Slack webhook alerts
-- [ ] Market-specific monitoring mode
-- [ ] Export suspicious wallet reports
+
+## Research & Analysis
+
+### Research Documents
+| Document | Topic |
+|----------|-------|
+| `research/SYNTHESIS.md` | Original detection thesis synthesis (scoring model design) |
+| `research/V4B_FARM_DETECTION.md` | MM filter investigation (§1–§13): CLOB settlement, both-side trading, three-check design |
+| `research/REWARD_FARMING.md` | $POLY airdrop farming patterns |
+| `research/TRADING_STRATEGIES.md` | Strategy classification (FARM/INSIDER/INFORMED) |
+| `research/RQ1_LANDSCAPE.md` — `RQ4_COUNTER_TRADING.md` | Original research questions |
+| `research/ADDENDUM_KELLY_CRITERION.md` | Kelly criterion for position sizing |
+| `research/API_LANDSCAPE.md` | Polymarket API documentation |
+| `CONFIG_REFERENCE.md` | Every config.toml parameter with tuning guidance |
+
+### Analysis Scripts
+| Script | Purpose |
+|--------|---------|
+| `scripts/sports_thesis_validation.py` | Score 11K+ sports trades through proposed sporty_investor detectors |
+| `scripts/sports_hypothesis.py` | Original sports hypothesis exploration |
+| `scripts/sports_analysis.py` | Sports signal classification and win rates |
+| `scripts/sports_timing.py` | Pre-game vs. in-play timing analysis |
+| `scripts/backfill_resolutions.py` | One-time backfill of market resolution outcomes |
+
+### Key Empirical Findings
+
+**Insider scoring (31K trades):** Score 7.0–7.9 is the only positive-EV band (+1.1% avg return). Scores 9-10 have 15% win rates — they identify near-certainty bets, not informative prices. Politics has 100% resolved win rate (N=3), Sports 42.9% (N=21).
+
+**Sports signals (11K+ sub-threshold):** Pre-game timing, contrarian entry prices ($0.35–$0.50), and moderately-thin markets ($10K–$25K daily) mark the profitable subset. Post-game and during-game trades are noise.
+
+**CLOB settlement:** 55.6% of early paper positions were settlement artifacts. The three-check MM filter (matched-pair + wallet lookback + anti-hedge) eliminates this class.
+
+**Crypto exclusion:** 91% of crypto signals are 5-min binary micro-markets at $0.99 avg price. No insider edge, no informed-bettor edge, pure noise.
 
 ## Project Structure
 
 ```
 spyhop/
-├── CLAUDE.md
-├── CONFIG_REFERENCE.md      # Every config.toml parameter: how it works, tuning guidance, research citations
-├── pyproject.toml
-├── config.toml              # User-configurable thresholds
+├── CLAUDE.md                    # This file
+├── CONFIG_REFERENCE.md          # Full config parameter reference
+├── pyproject.toml               # Build config + ruff + pytest
+├── config.toml                  # User-configurable thresholds (thesis-structured)
+├── research/                    # Research docs and analysis
+├── scripts/                     # One-time analysis scripts
 ├── src/
 │   └── spyhop/
 │       ├── __init__.py
-│       ├── __main__.py       # CLI entry (watch / wallet / history)
-│       ├── cli.py            # Rich live display + handle_trade loop
-│       ├── config.py         # TOML config loader
+│       ├── __main__.py          # CLI entry (watch / wallet / history / positions / paper-reset)
+│       ├── cli.py               # Rich live display, handle_trade(), thesis routing
+│       ├── config.py            # TOML config loader + _migrate_config()
 │       ├── ingestor/
 │       │   ├── __init__.py
-│       │   └── rtds.py       # RTDS WebSocket client
+│       │   └── rtds.py          # RTDS WebSocket client
 │       ├── profiler/
 │       │   ├── __init__.py
-│       │   ├── wallet.py     # Wallet history & profile (Data API)
-│       │   ├── market.py     # Market metadata cache (Gamma API)
-│       │   └── event.py      # Event category cache (Gamma API)
+│       │   ├── wallet.py        # Wallet profile (Data API)
+│       │   ├── market.py        # Market metadata (Gamma API)
+│       │   └── event.py         # Event category (Gamma API)
 │       ├── detector/
-│       │   ├── __init__.py   # build_scorer() factory
-│       │   ├── base.py       # Protocol, DetectionContext, ScoreResult
-│       │   ├── fresh_wallet.py
-│       │   ├── size_anomaly.py
-│       │   ├── niche_market.py
-│       │   └── scorer.py     # Multiplicative composite scoring
+│       │   ├── __init__.py      # build_scorer() + build_sports_scorer() factories
+│       │   ├── base.py          # Detector protocol, DetectionContext, ScoreResult
+│       │   ├── scorer.py        # Multiplicative composite scoring (thesis-agnostic)
+│       │   ├── fresh_wallet.py  # Insider: wallet freshness (0-5 trades)
+│       │   ├── size_anomaly.py  # Insider: trade size vs market volume
+│       │   ├── niche_market.py  # Insider: low-volume market (linear)
+│       │   ├── timing_gate.py   # Sports: pre-game binary gate
+│       │   ├── entry_price.py   # Sports: contrarian price sweet spot
+│       │   ├── niche_nonlinear.py # Sports: volume sweet spot (non-linear)
+│       │   └── wallet_experience.py # Sports: experienced wallet (inverse of fresh)
+│       ├── paper/
+│       │   ├── __init__.py
+│       │   ├── trader.py        # PaperTrader orchestrator (thesis-scoped)
+│       │   ├── risk.py          # RiskEngine (thesis-scoped capital + exposure)
+│       │   └── executor.py      # PaperExecutor (DB writes)
 │       └── storage/
 │           ├── __init__.py
-│           └── db.py         # SQLite schema & queries
+│           └── db.py            # SQLite schema, migrations, thesis-scoped queries
 └── tests/
+    └── test_paper_trading.py    # 38 tests (DB helpers, MM filter, risk, paper trader)
 ```
-
-## Reference Repositories
-
-- **pselamy/polymarket-insider-tracker** — Most mature OSS insider tracker. Pipeline architecture (ingestor→profiler→detector→alerter), DBSCAN temporal clustering, funding chain tracing, PostgreSQL+Redis. Good patterns but heavyweight.
-- **NickNaskida/polymarket-insider-bot** — Lighter alternative. Async Python, SQLite, Slack. Simpler 0-10 scoring. Reportedly AI-generated.
-- **Polymarket/py-clob-client** — Official Python SDK for CLOB API. Level 0 = unauthenticated read-only. Current version 0.34.6.
-- **Polymarket/agents** — Official AI agent framework. Good Pydantic models and Gamma API patterns. 170 deps (too heavy for us).
 
 ## Coding Conventions
 
-- Use `httpx` for all HTTP requests (async-capable)
-- Use `asyncio` for WebSocket + concurrent profiling
+- `httpx` for all HTTP requests (async-capable)
+- `asyncio` for WebSocket + concurrent profiling
 - Type hints on all public functions
-- Pydantic models for API response parsing
 - Config-driven thresholds (no magic numbers in detection logic)
-- SQLite via stdlib `sqlite3` (no ORM needed for MVP)
-- `rich` for all terminal output (tables, progress, logs)
+- SQLite via stdlib `sqlite3` (no ORM)
+- `rich` for all terminal output
+- `ruff` for linting (configured in `pyproject.toml`, line-length 100)
 
 ## Operational Notes
 
-### Use the spyhop CLI for data queries
-Before writing ad-hoc Python to query the SQLite database, check if an existing CLI command already does it:
-- `spyhop history --min-score 7` — show scored signals
-- `spyhop wallet <addr>` — deep wallet lookup
-- `spyhop watch` — live stream
+### CLI Commands
+```
+spyhop watch                        # Live stream with scoring + paper trading
+spyhop history --min-score 7        # Show scored signals
+spyhop history --thesis sporty_investor  # Filter by thesis
+spyhop wallet <addr>                # Deep wallet lookup
+spyhop positions --refresh          # Open paper positions (with live prices)
+spyhop paper-reset --confirm        # Reset paper trading portfolio
+```
 
-### Config loading & CWD sensitivity
-- `load_config()` searches: `./config.toml` → project root → user config dir → built-in defaults
-- When installed via `pip install -e .` and run from a different CWD, `./config.toml` won't match — the project-root fallback (`_project_root()`) handles this
-- `config.py` logs at INFO which file was loaded, or WARNING if falling through to defaults — check startup logs if config values seem wrong
+### Config Loading
+- Search order: explicit `--config` path → `./config.toml` → project root → user config dir → built-in defaults
+- `config.py` logs at INFO which file was loaded, WARNING if falling through to defaults
 - Silent fallback to defaults is the most common cause of "paper trading won't enable" — `paper.enabled` defaults to `False`
 
-### Windows environment quirks
-- **User's shell is PowerShell** — always give PowerShell-compatible commands, not Unix/bash (e.g., `Get-Content file -Wait` not `tail -f`, `Select-String` not `grep`)
-- No `sqlite3` CLI available — use Python's `sqlite3` module or the spyhop CLI
-- When running inline Python via bash, use heredoc (`python3 << 'PYEOF'`) to avoid f-string/dict-key quoting conflicts
-- DB path: `C:/Users/thoma/AppData/Local/spyhop/spyhop.db`
+### Database
+- Path: `C:/Users/thoma/AppData/Local/spyhop/spyhop.db`
+- Schema auto-migrates via `_migrate()` on startup (ALTER TABLE with DEFAULT for new columns)
+- Key tables: `trades`, `markets`, `wallets`, `events`, `signals` (with `thesis` column), `paper_positions` (with `thesis` column)
+- No `sqlite3` CLI available on this machine — use Python's `sqlite3` module or the spyhop CLI
+
+### Windows Environment
+- Shell is PowerShell — give PowerShell-compatible commands
+- When running inline Python via bash, use heredoc (`python3 << 'PYEOF'`) to avoid quoting conflicts
+- Scripts use `sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")` for Unicode table output
