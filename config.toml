@@ -29,7 +29,7 @@ exclude_categories = ["Crypto", "Sports"]  # Sports handled by sporty_investor
 [thesis.insider.detector.fresh_wallet]
 max_prior_trades = 5            # Wallets with <= this many trades are "fresh"
 multiplier_zero = 3.0           # 0 prior trades
-multiplier_low = 2.5            # 1-2 prior trades
+multiplier_low = 2.0            # 1-2 prior trades (collapsed with mid: 1-5 = single tier)
 multiplier_mid = 2.0            # 3-5 prior trades
 
 [thesis.insider.detector.size_anomaly]
@@ -43,8 +43,8 @@ multiplier_high = 3.0           # 10%+ of 24h volume
 [thesis.insider.detector.niche_market]
 max_daily_volume_usd = 50_000   # Markets below this are "niche"
 multiplier_low = 1.5            # $25K-$50K daily
-multiplier_mid = 2.0            # $10K-$25K daily
-multiplier_high = 2.5           # <$10K daily
+multiplier_mid = 2.2            # $10K-$25K daily
+multiplier_high = 2.8           # <$10K daily
 
 [thesis.insider.detector.mm_filter]
 enabled = true                   # Toggle MM filter on/off
@@ -79,16 +79,16 @@ min_hours_before = 0              # must be placed before game start
 [thesis.sporty_investor.detector.entry_price]
 sweet_spot_low = 0.35
 sweet_spot_high = 0.50
-multiplier_sweet = 2.0
-multiplier_adjacent = 1.5
+multiplier_sweet = 1.0       # flattened — no entry price boost until data supports it
+multiplier_adjacent = 1.0    # flattened — 48 positions insufficient to validate sweet spot
 near_certainty_threshold = 0.85
-near_certainty_multiplier = 0.5
+near_certainty_multiplier = 0.5  # keep near-certainty dampen
 
 [thesis.sporty_investor.detector.niche_nonlinear]
-sweet_spot_low_vol = 10_000
+sweet_spot_low_vol = 5_000    # expanded from $10K — $5K-$25K sweet spot
 sweet_spot_high_vol = 25_000
 multiplier_sweet = 2.0
-multiplier_adjacent = 1.5
+multiplier_adjacent = 1.0     # dropped from 1.5 — $25K-$50K has no empirical edge
 
 [thesis.sporty_investor.detector.wallet_experience]
 sweet_spot_low = 6

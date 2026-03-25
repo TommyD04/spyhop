@@ -212,6 +212,13 @@ class ResolutionPoller:
             return None
 
         exit_price = float(outcome_prices[outcome_index])
+        # Snap to canonical settlement values — the boundary trigger (≥0.99 / ≤0.01)
+        # means the market has effectively settled; use exact 1.0/0.0 for P&L so that
+        # near-settled prices (e.g. 0.9985) don't produce incorrect results.
+        if exit_price >= 0.99:
+            exit_price = 1.0
+        elif exit_price <= 0.01:
+            exit_price = 0.0
         realized_pnl = (exit_price - entry_price) * token_qty
 
         if exit_price >= 0.99:

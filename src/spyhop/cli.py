@@ -78,12 +78,15 @@ def _format_mult(val: float | None) -> Text:
 def _format_score(trade: dict[str, Any]) -> Text:
     """Format composite suspicion score with alert highlighting.
 
+    Appends 's' suffix for sporty_investor scores (different scale/thresholds).
     Appends '$' if the trade triggered a paper entry.
     """
     score = trade.get("score")
     if score is None or score == 0:
         return Text("-", style="dim")
     label = f"{score:.1f}"
+    if trade.get("thesis") == "sporty_investor":
+        label += "s"
     if trade.get("paper_entry"):
         label += "$"
     if score >= 9:
@@ -613,7 +616,9 @@ async def history_view(
 
     for s in signals:
         score = s["composite_score"]
-        score_text = Text(f"{score:.1f}")
+        sig_thesis = s.get("thesis", "insider")
+        score_label = f"{score:.1f}" + ("s" if sig_thesis == "sporty_investor" else "")
+        score_text = Text(score_label)
         if score >= 9:
             score_text.stylize("bold red")
         elif score >= 7:
@@ -629,7 +634,6 @@ async def history_view(
             return Text("-", style="dim")
 
         ts = s.get("timestamp", "")
-        sig_thesis = s.get("thesis", "insider")
         thesis_text = _format_thesis({"thesis": sig_thesis})
 
         table.add_row(
@@ -742,7 +746,7 @@ async def positions_view(
             current_display,
             f"${size_usd:,.0f}",
             unrealized_display,
-            f"{pos['score_at_entry']:.1f}",
+            f"{pos['score_at_entry']:.1f}" + ("s" if pos.get("thesis") == "sporty_investor" else ""),
         )
 
     console.print(table)
