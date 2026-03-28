@@ -540,3 +540,110 @@ def get_open_positions_for_condition(
         (condition_id,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── Report / P&L dashboard helpers ────────────────────────────────
+
+
+def get_resolved_positions(
+    conn: sqlite3.Connection,
+    thesis: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return all RESOLVED paper positions, most recent first.
+
+    Optionally filtered by thesis name.
+    """
+    if thesis:
+        rows = conn.execute(
+            """SELECT * FROM paper_positions
+               WHERE status = 'RESOLVED' AND thesis = ?
+               ORDER BY exit_timestamp DESC""",
+            (thesis,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT * FROM paper_positions
+               WHERE status = 'RESOLVED'
+               ORDER BY exit_timestamp DESC"""
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_open_positions_with_market(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Return OPEN positions joined with market data, ordered by soonest end_date.
+
+    Adds 'end_date' and 'cached_outcome_prices' columns from the markets table.
+    Positions with no matching market row sort last (NULL end_date sorts last in
+    SQLite when using ORDER BY ... IS NULL trick via CASE).
+    """
+    rows = conn.execute(
+        """SELECT pp.*, m.end_date,
+                  m.outcome_prices AS cached_outcome_prices
+           FROM paper_positions pp
+           LEFT JOIN markets m ON pp.condition_id = m.condition_id
+           WHERE pp.status = 'OPEN'
+           ORDER BY CASE WHEN m.end_date IS NULL THEN 1 ELSE 0 END,
+                    m.end_date ASC"""
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_score_band_breakdown(
+    conn: sqlite3.Connection,
+    thesis: str | None = None,
+) -> list[dict[str, Any]]:
+    """Aggregate resolved positions by score band (floor of score_at_entry).
+
+    Returns rows with: band_floor (int), count, wins, total_pnl, avg_pnl.
+    Ordered band_floor ascending.
+    """
+    if thesis:
+        rows = conn.execute(
+            """SELECT
+                   CAST(score_at_entry AS INTEGER) AS band_floor,
+                   COUNT(*) AS count,
+                   SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                   COALESCE(SUM(realized_pnl), 0.0) AS total_pnl,
+                   COALESCE(AVG(realized_pnl), 0.0) AS avg_pnl
+               FROM paper_positions
+               WHERE status = 'RESOLVED' AND thesis = ?
+               GROUP BY band_floor
+               ORDER BY band_floor ASC""",
+            (thesis,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT
+                   CAST(score_at_entry AS INTEGER) AS band_floor,
+                   COUNT(*) AS count,
+                   SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                   COALESCE(SUM(realized_pnl), 0.0) AS total_pnl,
+                   COALESCE(AVG(realized_pnl), 0.0) AS avg_pnl
+               FROM paper_positions
+               WHERE status = 'RESOLVED'
+               GROUP BY band_floor
+               ORDER BY band_floor ASC"""
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_pnl_summary(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Aggregate P&L stats grouped by thesis and status.
+
+    Returns rows with: thesis, status, count, wins, realized_pnl, deployed_usd.
+    Used to build the report summary header panel.
+    """
+    rows = conn.execute(
+        """SELECT
+               thesis,
+               status,
+               COUNT(*) AS count,
+               SUM(CASE WHEN status = 'RESOLVED' AND realized_pnl > 0
+                        THEN 1 ELSE 0 END) AS wins,
+               COALESCE(SUM(CASE WHEN status = 'RESOLVED'
+                                 THEN realized_pnl ELSE 0 END), 0.0) AS realized_pnl,
+               COALESCE(SUM(size_usd), 0.0) AS deployed_usd
+           FROM paper_positions
+           GROUP BY thesis, status"""
+    ).fetchall()
+    return [dict(r) for r in rows]

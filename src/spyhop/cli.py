@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sqlite3
-from collections import deque
+from collections import defaultdict, deque
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -141,6 +143,74 @@ def _format_market(trade: dict[str, Any]) -> str:
     return question
 
 
+def _format_pnl(amount: float) -> Text:
+    """Format a P&L value as $+12,400 (green) or $-3,200 (red)."""
+    style = "green" if amount >= 0 else "red"
+    return Text(f"${amount:+,.0f}", style=style)
+
+
+def _format_time_to_close(
+    end_date_str: str | None,
+    *,
+    _now: datetime | None = None,
+) -> Text:
+    """Format time remaining until market close as a human-readable string.
+
+    Returns e.g. '2h', '1d 4h', '45m', dim 'past', dim '—' (no data).
+    Accepts an optional _now for deterministic testing.
+
+    Normalizes naive end_date strings (e.g. Gamma's bare '2026-06-30' dates)
+    to UTC — mandatory per project timezone rule to avoid silent comparison errors.
+    """
+    if not end_date_str:
+        return Text("—", style="dim")
+    try:
+        dt = datetime.fromisoformat(end_date_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        now = _now or datetime.now(timezone.utc)
+        total_seconds = (dt - now).total_seconds()
+        if total_seconds < 0:
+            return Text("past", style="dim")
+        hours = int(total_seconds // 3600)
+        minutes = int((total_seconds % 3600) // 60)
+        days = hours // 24
+        rem_hours = hours % 24
+        if days > 0:
+            label = f"{days}d {rem_hours}h"
+        elif hours > 0:
+            label = f"{hours}h"
+        else:
+            label = f"{minutes}m"
+        style = "yellow" if total_seconds < 3600 else ""
+        return Text(label, style=style) if style else Text(label)
+    except (ValueError, TypeError):
+        return Text("?", style="dim")
+
+
+def _compute_mtm(
+    pos: dict[str, Any],
+    cached_prices_json: str | None,
+) -> tuple[float | None, str]:
+    """Compute mark-to-market for an open position using cached outcome prices.
+
+    Returns (unrealized_pnl, current_price_display).
+    Both are None / '—' when price data is unavailable.
+    """
+    if not cached_prices_json:
+        return None, "—"
+    try:
+        prices = [float(p) for p in json.loads(cached_prices_json)]
+        idx = pos["outcome_index"]
+        if idx >= len(prices):
+            return None, "—"
+        current = prices[idx]
+        unrealized = (current - pos["entry_price"]) * pos["token_qty"]
+        return unrealized, f"{current * 100:.1f}\u00a2"
+    except (json.JSONDecodeError, TypeError, ValueError, KeyError):
+        return None, "—"
+
+
 def _build_table(
     trades: deque[dict[str, Any]],
     trade_count: int,
@@ -234,7 +304,6 @@ def _build_signal_dict(
     Insider signals populate the legacy fresh/size/niche columns.
     Other theses set them to 1.0 and store all detector data in detector_results.
     """
-    import json
 
     sig: dict[str, Any] = {
         "trade_id": trade_id,
@@ -657,8 +726,6 @@ async def positions_view(
     refresh: bool = False,
 ) -> None:
     """Display open paper trading positions with optional mark-to-market."""
-    import json
-
     console = Console()
     positions = db.get_open_positions(conn)
 
@@ -789,6 +856,172 @@ def paper_reset(conn: sqlite3.Connection, confirm: bool = False) -> None:
 
     deleted = db.delete_all_paper_positions(conn)
     console.print(f"[green]Deleted {deleted} paper positions.[/]")
+
+
+async def report_view(config: dict[str, Any], conn: sqlite3.Connection) -> None:
+    """Unified P&L dashboard: summary, open positions (MTM), resolved, score bands.
+
+    Uses only cached DB data — no HTTP calls.
+    """
+    console = Console()
+
+    open_positions = db.get_open_positions_with_market(conn)
+    resolved_positions = db.get_resolved_positions(conn)
+    score_bands = db.get_score_band_breakdown(conn)
+
+    # Mark-to-market for open positions
+    total_unrealized = 0.0
+    mtm_cache: list[tuple[float | None, str]] = []
+    for pos in open_positions:
+        pnl, price_str = _compute_mtm(pos, pos.get("cached_outcome_prices"))
+        mtm_cache.append((pnl, price_str))
+        if pnl is not None:
+            total_unrealized += pnl
+
+    # Summary totals
+    realized_pnl = sum((p["realized_pnl"] or 0.0) for p in resolved_positions)
+    combined_pnl = realized_pnl + total_unrealized
+    resolved_wins = sum(1 for p in resolved_positions if (p["realized_pnl"] or 0.0) > 0)
+    resolved_losses = len(resolved_positions) - resolved_wins
+
+    # Per-thesis breakdown
+    thesis_realized: dict[str, float] = defaultdict(float)
+    thesis_open_count: dict[str, int] = defaultdict(int)
+    for p in resolved_positions:
+        thesis_realized[p.get("thesis", "insider")] += (p["realized_pnl"] or 0.0)
+    for p in open_positions:
+        thesis_open_count[p.get("thesis", "insider")] += 1
+
+    r_style = "green" if realized_pnl >= 0 else "red"
+    u_style = "green" if total_unrealized >= 0 else "red"
+    c_style = "green" if combined_pnl >= 0 else "red"
+
+    thesis_lines = ""
+    all_theses = sorted(set(list(thesis_realized.keys()) + list(thesis_open_count.keys())))
+    for t in all_theses:
+        abbrev = _THESIS_ABBREV.get(t, t)
+        r = thesis_realized.get(t, 0.0)
+        o = thesis_open_count.get(t, 0)
+        ts = "green" if r >= 0 else "red"
+        thesis_lines += f"\n[bold]{abbrev}:[/]             [{ts}]${r:+,.0f}[/] realized | {o} open"
+
+    summary = (
+        f"[bold]Realized P&L:[/]   [{r_style}]${realized_pnl:+,.0f}[/]\n"
+        f"[bold]Unrealized P&L:[/] [{u_style}]${total_unrealized:+,.0f}[/]  (mark-to-market, cached prices)\n"
+        f"[bold]Combined P&L:[/]   [{c_style}]${combined_pnl:+,.0f}[/]\n\n"
+        f"[bold]Resolved:[/]       {len(resolved_positions)} ({resolved_wins}W / {resolved_losses}L)\n"
+        f"[bold]Open:[/]           {len(open_positions)}"
+        f"{thesis_lines}"
+    )
+    console.print(Panel(summary, title="P&L Summary", border_style="blue"))
+
+    # Open positions table
+    if open_positions:
+        table = Table(title="Open Positions (soonest expiry first)", expand=True)
+        table.add_column("Entry", style="dim", width=16, no_wrap=True)
+        table.add_column("Market", ratio=1)
+        table.add_column("Th", width=2, no_wrap=True)
+        table.add_column("Score", justify="right", width=6, no_wrap=True)
+        table.add_column("Entry\u00a2", justify="right", width=6, no_wrap=True)
+        table.add_column("Now\u00a2", justify="right", width=6, no_wrap=True)
+        table.add_column("Unrealized", justify="right", width=10, no_wrap=True)
+        table.add_column("Closes", justify="right", width=8, no_wrap=True)
+
+        for pos, (pnl, price_str) in zip(open_positions, mtm_cache):
+            score = pos["score_at_entry"]
+            thesis = pos.get("thesis", "insider")
+            score_label = f"{score:.1f}" + ("s" if thesis == "sporty_investor" else "")
+            if score >= 9:
+                score_text = Text(score_label, style="bold red")
+            elif score >= 7:
+                score_text = Text(score_label, style="bold yellow")
+            else:
+                score_text = Text(score_label, style="yellow")
+
+            unreal_text = _format_pnl(pnl) if pnl is not None else Text("\u2014", style="dim")
+            question = (pos.get("market_question") or pos["condition_id"][:20])[:45]
+
+            table.add_row(
+                pos["entry_timestamp"][:16],
+                question,
+                _format_thesis({"thesis": thesis}),
+                score_text,
+                f"{pos['entry_price'] * 100:.1f}",
+                price_str if price_str != "\u2014" else Text("\u2014", style="dim"),
+                unreal_text,
+                _format_time_to_close(pos.get("end_date")),
+            )
+        console.print(table)
+    else:
+        console.print("[dim]No open positions.[/]")
+
+    # Resolved positions table
+    if resolved_positions:
+        table = Table(title="Resolved Positions (most recent first)", expand=True)
+        table.add_column("Exit", style="dim", width=16, no_wrap=True)
+        table.add_column("Market", ratio=1)
+        table.add_column("Th", width=2, no_wrap=True)
+        table.add_column("Score", justify="right", width=6, no_wrap=True)
+        table.add_column("Entry\u00a2", justify="right", width=6, no_wrap=True)
+        table.add_column("Exit\u00a2", justify="right", width=6, no_wrap=True)
+        table.add_column("P&L", justify="right", width=10, no_wrap=True)
+        table.add_column("", width=4, no_wrap=True)
+
+        for pos in resolved_positions:
+            score = pos["score_at_entry"]
+            thesis = pos.get("thesis", "insider")
+            score_label = f"{score:.1f}" + ("s" if thesis == "sporty_investor" else "")
+            if score >= 9:
+                score_text = Text(score_label, style="bold red")
+            elif score >= 7:
+                score_text = Text(score_label, style="bold yellow")
+            else:
+                score_text = Text(score_label, style="yellow")
+
+            pnl = pos["realized_pnl"] or 0.0
+            result_text = Text("WIN", style="green") if pnl > 0 else Text("LOSS", style="red")
+            question = (pos.get("market_question") or pos["condition_id"][:20])[:45]
+
+            table.add_row(
+                (pos.get("exit_timestamp") or "")[:16],
+                question,
+                _format_thesis({"thesis": thesis}),
+                score_text,
+                f"{pos['entry_price'] * 100:.1f}",
+                f"{(pos.get('exit_price') or 0.0) * 100:.1f}",
+                _format_pnl(pnl),
+                result_text,
+            )
+        console.print(table)
+    else:
+        console.print("[dim]No resolved positions yet.[/]")
+
+    # Score band breakdown
+    if score_bands:
+        table = Table(title="Score Band Breakdown (resolved)", expand=True)
+        table.add_column("Band", width=6, no_wrap=True)
+        table.add_column("Count", justify="right", width=6, no_wrap=True)
+        table.add_column("Wins", justify="right", width=5, no_wrap=True)
+        table.add_column("Win%", justify="right", width=5, no_wrap=True)
+        table.add_column("Total P&L", justify="right", width=11, no_wrap=True)
+        table.add_column("Avg P&L", justify="right", width=10, no_wrap=True)
+
+        for band in score_bands:
+            bf = band["band_floor"]
+            count = band["count"]
+            wins = band["wins"]
+            win_pct = wins / count * 100 if count > 0 else 0
+            win_style = "green" if win_pct >= 50 else "red"
+
+            table.add_row(
+                f"{bf}\u2013{bf + 1}",
+                str(count),
+                str(wins),
+                Text(f"{win_pct:.0f}%", style=win_style),
+                _format_pnl(band["total_pnl"]),
+                _format_pnl(band["avg_pnl"]),
+            )
+        console.print(table)
 
 
 async def resolve_once(config: dict[str, Any], conn: sqlite3.Connection) -> None:
