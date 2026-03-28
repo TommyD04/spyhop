@@ -26,8 +26,13 @@ def _make_conn() -> sqlite3.Connection:
     return conn
 
 
+_trade_seq = 0
+
+
 def _insert_dummy_trade(conn: sqlite3.Connection, **kw) -> int:
     """Insert a minimal trade row, return its ID."""
+    global _trade_seq
+    _trade_seq += 1
     trade = {
         "timestamp": "2026-03-08T12:00:00Z",
         "wallet": "0xabc123",
@@ -37,7 +42,7 @@ def _insert_dummy_trade(conn: sqlite3.Connection, **kw) -> int:
         "condition_id": "cond_001",
         "asset_id": "asset_001",
         "market_question": "Will Raptors win?",
-        "tx_hash": "0xtx001",
+        "tx_hash": f"0xtx{_trade_seq:06d}",
         "outcome": "Yes",
         "outcome_index": 0,
     }

@@ -136,6 +136,19 @@ def _migrate(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError:
             pass
 
+    # Dedup: prevent duplicate RTDS messages from creating duplicate trades.
+    # (tx_hash, wallet) uniquely identifies a CLOB fill — same hash from the same
+    # wallet is definitively the same event re-broadcast by the firehose.
+    # SQLite NULL != NULL in UNIQUE, so trades with no tx_hash are unaffected.
+    try:
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_txhash_wallet "
+            "ON trades(tx_hash, wallet) WHERE tx_hash IS NOT NULL"
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
 
 def init_db(path: Path) -> sqlite3.Connection:
     """Open (or create) the database and ensure schema exists."""
@@ -146,10 +159,14 @@ def init_db(path: Path) -> sqlite3.Connection:
     return conn
 
 
-def insert_trade(conn: sqlite3.Connection, trade: dict[str, Any]) -> int:
-    """Insert a single trade record. Returns the row ID."""
+def insert_trade(conn: sqlite3.Connection, trade: dict[str, Any]) -> int | None:
+    """Insert a single trade record. Returns the row ID, or None if duplicate.
+
+    Uses INSERT OR IGNORE with the (tx_hash, wallet) unique index to silently
+    drop duplicate RTDS messages. Callers should skip scoring when None is returned.
+    """
     cur = conn.execute(
-        """INSERT INTO trades
+        """INSERT OR IGNORE INTO trades
            (timestamp, wallet, side, usdc_size, price, condition_id, asset_id,
             market_question, tx_hash, outcome, outcome_index)
            VALUES (:timestamp, :wallet, :side, :usdc_size, :price, :condition_id,
@@ -157,6 +174,8 @@ def insert_trade(conn: sqlite3.Connection, trade: dict[str, Any]) -> int:
         trade,
     )
     conn.commit()
+    if cur.rowcount == 0:
+        return None  # duplicate trade — same tx_hash + wallet already recorded
     return cur.lastrowid
 
 

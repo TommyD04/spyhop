@@ -465,8 +465,11 @@ async def watch(config: dict[str, Any], conn: sqlite3.Connection) -> None:
 
             context = DetectionContext(trade=trade, wallet_profile=profile, market=market)
 
-            # Persist trade (always, regardless of thesis)
+            # Persist trade (always, regardless of thesis).
+            # Returns None for duplicate RTDS messages (same tx_hash + wallet) — skip scoring.
             trade_id = db.insert_trade(conn, trade)
+            if trade_id is None:
+                return  # duplicate RTDS message — already scored, skip
 
             # ── Route to matching theses ────────────────────────
             tag = trade.get("primary_tag", "")
