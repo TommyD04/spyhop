@@ -140,6 +140,25 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # (tx_hash, wallet) uniquely identifies a CLOB fill — same hash from the same
     # wallet is definitively the same event re-broadcast by the firehose.
     # SQLite NULL != NULL in UNIQUE, so trades with no tx_hash are unaffected.
+    #
+    # Must purge existing duplicates before creating the UNIQUE INDEX — SQLite
+    # refuses to build it on a table that already has conflicting rows.
+    # Keep the lowest id (first recorded) per (tx_hash, wallet) group; cascade
+    # to signals and paper_positions so no orphaned rows remain.
+    dup_trade_ids_sql = """
+        SELECT id FROM trades
+        WHERE tx_hash IS NOT NULL
+          AND id NOT IN (
+              SELECT MIN(id) FROM trades
+              WHERE tx_hash IS NOT NULL
+              GROUP BY tx_hash, wallet
+          )
+    """
+    conn.execute(f"DELETE FROM signals WHERE trade_id IN ({dup_trade_ids_sql})")
+    conn.execute(f"DELETE FROM paper_positions WHERE trade_id IN ({dup_trade_ids_sql})")
+    conn.execute(f"DELETE FROM trades WHERE id IN ({dup_trade_ids_sql})")
+    conn.commit()
+
     try:
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_txhash_wallet "
