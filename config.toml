@@ -46,6 +46,14 @@ multiplier_low = 1.5            # $25K-$50K daily
 multiplier_mid = 2.2            # $10K-$25K daily
 multiplier_high = 2.8           # <$10K daily
 
+[thesis.insider.detector.entry_price]
+sweet_spot_low = 0.35
+sweet_spot_high = 0.50
+multiplier_sweet = 1.0           # no boost — insider entry price is not a positive signal
+multiplier_adjacent = 1.0        # no boost
+near_certainty_threshold = 0.85  # B1: dampen near-certainty bets (reward farming / noise)
+near_certainty_multiplier = 0.5
+
 [thesis.insider.detector.mm_filter]
 enabled = true                   # Toggle MM filter on/off
 settle_delay_seconds = 7         # Wait for settlement pair to arrive in DB

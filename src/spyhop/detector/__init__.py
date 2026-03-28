@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from spyhop.detector.entry_price import EntryPriceDetector
 from spyhop.detector.fresh_wallet import FreshWalletDetector
 from spyhop.detector.niche_market import NicheMarketDetector
 from spyhop.detector.scorer import Scorer
@@ -11,8 +12,10 @@ from spyhop.detector.size_anomaly import SizeAnomalyDetector
 
 
 def build_scorer(config: dict[str, Any]) -> Scorer:
-    """Create the insider Scorer with FreshWallet/SizeAnomaly/NicheMarket detectors.
+    """Create the insider Scorer with FreshWallet/SizeAnomaly/NicheMarket/EntryPrice detectors.
 
+    EntryPriceDetector acts as a near-certainty kill switch (B1): entries >= 0.85
+    are dampened to 0.5x. Sweet/adjacent multipliers are 1.0 (no boost).
     Reads from flat config keys (backward compat) or thesis.insider.
     """
     det_cfg = config.get("detector", {})
@@ -20,6 +23,7 @@ def build_scorer(config: dict[str, Any]) -> Scorer:
         FreshWalletDetector(det_cfg.get("fresh_wallet", {})),
         SizeAnomalyDetector(det_cfg.get("size_anomaly", {})),
         NicheMarketDetector(det_cfg.get("niche_market", {})),
+        EntryPriceDetector(det_cfg.get("entry_price", {})),
     ]
     return Scorer(config.get("scorer", {}), detectors)
 

@@ -62,6 +62,14 @@ DEFAULTS: dict[str, Any] = {
             "multiplier_mid": 2.0,
             "multiplier_high": 2.5,
         },
+        "entry_price": {
+            "sweet_spot_low": 0.35,
+            "sweet_spot_high": 0.50,
+            "multiplier_sweet": 1.0,       # no boost — only near-certainty dampening
+            "multiplier_adjacent": 1.0,
+            "near_certainty_threshold": 0.85,
+            "near_certainty_multiplier": 0.5,
+        },
         "mm_filter": {
             "enabled": False,
             "settle_delay_seconds": 7,
@@ -115,6 +123,14 @@ _THESIS_DEFAULTS: dict[str, Any] = {
                 "multiplier_low": 1.5,
                 "multiplier_mid": 2.0,
                 "multiplier_high": 2.5,
+            },
+            "entry_price": {
+                "sweet_spot_low": 0.35,
+                "sweet_spot_high": 0.50,
+                "multiplier_sweet": 1.0,       # no boost — only near-certainty dampening
+                "multiplier_adjacent": 1.0,
+                "near_certainty_threshold": 0.85,
+                "near_certainty_multiplier": 0.5,
             },
             "mm_filter": {
                 "enabled": False,
