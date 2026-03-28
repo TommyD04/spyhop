@@ -1,12 +1,17 @@
 """A4: Backfill historical resolutions from Gamma API.
 
-One-time script that refreshes market data for all markets with alert-level
-signals (score >= 7), then generates a calibration report mapping resolved
-outcomes to signal entry prices.
+Refreshes market data for all markets with alert-level signals, then:
+1. Creates paper positions in the DB for resolved insider signals that
+   don't already have one.
+2. Immediately closes those positions with the resolved outcome.
+3. Prints a calibration report.
+
+Use --dry-run to preview without writing to the DB.
 
 Usage:
     cd C:\\Users\\thoma\\Projects\\spyhop
     python scripts/backfill_resolutions.py
+    python scripts/backfill_resolutions.py --dry-run
 """
 
 from __future__ import annotations
@@ -24,7 +29,11 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 # Import from spyhop package (requires pip install -e . or PYTHONPATH)
 from spyhop.config import db_path
-from spyhop.storage.db import init_db, upsert_market
+from spyhop.storage.db import init_db, insert_paper_position, close_position, upsert_market
+
+# Position sizing for backfilled insider positions
+_BASE_POSITION_USD = 5_000.0
+_ALERT_THRESHOLD = 7.0
 
 GAMMA_URL = "https://gamma-api.polymarket.com"
 REQUEST_DELAY = 1.0  # seconds between API calls
@@ -111,6 +120,10 @@ def classify_signal(
 
 
 def main() -> None:
+    dry_run = "--dry-run" in sys.argv
+    if dry_run:
+        print("DRY RUN — no positions will be written to the DB\n")
+
     # ── Connect to DB ────────────────────────────────────────────
     path = db_path()
     print(f"Database: {path}")
@@ -188,15 +201,22 @@ def main() -> None:
     print()
 
     # ── Step 3: Query all alert signals with refreshed market data ─
+    # Scoped to insider thesis only. LEFT JOIN paper_positions so we can skip
+    # signals that already have a position (idempotent re-runs).
     signal_rows = conn.execute(
-        """SELECT s.composite_score, s.timestamp AS signal_ts,
+        """SELECT s.id AS signal_id, s.trade_id, s.composite_score,
+                  s.timestamp AS signal_ts, s.thesis,
                   t.side, t.price AS entry_price, t.condition_id,
                   t.outcome_index, t.market_question, t.usdc_size,
-                  m.outcome_prices, m.end_date, m.slug
+                  t.wallet, t.outcome,
+                  m.outcome_prices, m.end_date, m.slug,
+                  pp.id AS existing_pos_id
            FROM signals s
            JOIN trades t ON s.trade_id = t.id
            LEFT JOIN markets m ON t.condition_id = m.condition_id
+           LEFT JOIN paper_positions pp ON pp.signal_id = s.id
            WHERE s.is_alert = 1
+             AND s.thesis = 'insider'
              AND t.condition_id IS NOT NULL
              AND t.condition_id != ''
            ORDER BY s.composite_score DESC"""
@@ -234,6 +254,73 @@ def main() -> None:
             sig["pnl_pct"] = 0.0
             sig["effective_entry"] = sig.get("entry_price", 0.0)
             sig["exit_price"] = 0.0
+
+    # ── Step 6: Write backfilled paper positions to DB ────────────
+    now_ts = datetime.now(timezone.utc).isoformat()
+    pos_created = 0
+    pos_skipped_existing = 0
+    pos_skipped_open = 0
+
+    for sig in signals:
+        # Only write resolved outcomes
+        if sig["result"] not in ("WIN", "LOSS"):
+            pos_skipped_open += 1
+            continue
+
+        # Skip if position already exists for this signal
+        if sig.get("existing_pos_id"):
+            pos_skipped_existing += 1
+            continue
+
+        entry = sig["effective_entry"]
+        if entry <= 0:
+            continue
+
+        score = sig["composite_score"]
+        size_usd = _BASE_POSITION_USD * (score / _ALERT_THRESHOLD)
+        token_qty = size_usd / entry
+        exit_price = 1.0 if sig["result"] == "WIN" else 0.0
+        realized_pnl = (exit_price - entry) * token_qty
+
+        # Determine outcome/outcome_index from trade (SELL-normalized to BUY direction)
+        side = sig.get("side", "BUY")
+        raw_oi = sig.get("outcome_index") or 0
+        if side == "SELL":
+            effective_oi = 1 - raw_oi
+            normalized_side = "BUY"
+        else:
+            effective_oi = raw_oi
+            normalized_side = "BUY"
+
+        position = {
+            "trade_id": sig["trade_id"],
+            "signal_id": sig["signal_id"],
+            "condition_id": sig["condition_id"],
+            "market_question": sig.get("market_question", ""),
+            "outcome": sig.get("outcome", "Yes"),
+            "outcome_index": effective_oi,
+            "side": normalized_side,
+            "entry_price": entry,
+            "size_usd": size_usd,
+            "token_qty": token_qty,
+            "score_at_entry": score,
+            "wallet": sig.get("wallet", ""),
+            "entry_timestamp": sig["signal_ts"],
+            "thesis": "insider",
+        }
+
+        if not dry_run:
+            pos_id = insert_paper_position(conn, position)
+            close_position(conn, pos_id, exit_price, now_ts, realized_pnl)
+
+        pos_created += 1
+
+    print(f"\nBackfilled positions: {pos_created} created"
+          f" | {pos_skipped_existing} already existed"
+          f" | {pos_skipped_open} skipped (market still open)")
+    if dry_run:
+        print("(dry run — no writes made)")
+    print()
 
     # ── Print Report ──────────────────────────────────────────────
     resolved = [s for s in signals if s["result"] in ("WIN", "LOSS")]
